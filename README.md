@@ -1,11 +1,21 @@
 # pi-statusbar
 
-替换 pi 内置 footer 的多行扩展：第 1 行工作目录（~ 缩写）+ git 分支 + 会话名，第 2 行会话数据（上下文占用/用量/缓存 R/W/命中率/成本）+ 右侧模型身份（accent 高亮 + 工作中/待命指示 + thinking 级别），第 3 行扩展状态（若有）。窄屏自动逐段降级。
+替换 pi 内置 footer 的状态栏扩展，按现代终端设计理念（Claude Code statusline / claude-stat / Calm Tech / Starship）构建：
+
+```
+▰▱▱▱ 48.2%/200k · ↑126 ↓131 · ⇣24k ⚡58.3% · $0.123      ● model • medium
+~/workspace/pi ⎇ main +2 ~5 • 会话名 · [扩展状态]
+```
+
+- 第 1 行（仪表，变化频率最高）：上下文占用（渐变绿→黄→红，行动阈值 50%/80%）、输入/输出 token、缓存读/写、缓存命中率、成本。
+- 第 2 行（环境，低频信息）：工作目录（~ 缩写）、git 分支（accent）、暂存/修改计数（+绿 ~黄）、会话名、扩展状态（`ctx.ui.setStatus`）。
+- 右侧：模型身份（accent 加粗，● 工作中 / ○ 待命）+ 思考级别（官方 thinking* 色阶，灰→蓝→紫→品红表达智能程度）。
+- 窄屏按价值逐段降级：先丢会话名 → git → 成本 → 缓存 → 用量，永不换行、不挤压。
 
 ## 安装
 
 ```bash
-pi install git:github.com/audsiui/pi-statusbar@v1.0.0
+pi install git:github.com/audsiui/pi-statusbar@v1.1.0
 ```
 
 想临时试用（仅当前运行，不写入 settings）：
@@ -22,7 +32,9 @@ pi remove git:github.com/audsiui/pi-statusbar
 
 ## 说明
 
-- 多行布局：工作目录/分支/会话名独立一行，与内置 footer 信息层级一致；可叠加额外的状态行。
-- 上下文占用是唯一使用语义色的数据：>70% 警告（黄）、>90% 危险（红）；其余一律 dim。
-- 分支名用 accent 色，是唯一与数据并列的强调。
+- 颜色纪律：语义色只用于"有行动含义"的地方——上下文仪表（渐变）和 git 变更状态（+绿 ~黄）；其余一律 dim 保持安静。
+- 分支名与模型用 accent 色，是身份锚点。
+- 上下文阈值取社区实测的行动阈值：≥50% 黄（开始清理/压缩）、≥80% 红（准备开新会话），而非内置的被动阈值。
+- git 状态异步拉取 + 缓存（`GIT_OPTIONAL_LOCKS=0`），渲染永不阻塞。
+- 全部使用官方公共 API（`ExtensionAPI` / `sessionManager` / `footerData` / `theme`），统计口径与内置 footer 一致。
 - 依赖的 `@earendil-works/pi-*` 由 pi 核心打包，无需单独安装。
