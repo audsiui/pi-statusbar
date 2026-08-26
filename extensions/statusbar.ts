@@ -6,8 +6,9 @@
  *
  * - 状态栏是"外围显示"（periphery）：inform without demanding。
  *   扫一眼应能回答 4 个问题：我在哪 / 还能干多久 / 在烧多少钱 / 模型在什么状态。
- * - 多行叙事：第 1 行位置感（目录/分支/git 变更），第 2 行仪表（上下文/用量/
- *   缓存/成本）+ 右侧模型身份，第 3 行扩展状态（若有）。
+ * - 多行叙事：第 1 行是仪表（上下文/用量/缓存/成本 + 模型身份）——变化频率最高，
+ *   紧贴内容区；第 2 行是环境（目录/分支/git 变更/会话名 + 扩展状态）——
+ *   低频信息合并，按注意力随变化频率分配。
  * - 颜色 = 注意力线索，只在"有行动含义"处使用：
  *   上下文占用是仪表 —— 渐变绿→黄→红（<50% 绿 / ≥50% 黄 / ≥80% 红），
  *   阈值取社区实测的"行动阈值"（50% 清理对话、80% 开新会话），不是被动挨打阈值；
@@ -162,7 +163,7 @@ export default function (pi: ExtensionAPI) {
 				},
 				invalidate() {},
 				render(width: number): string[] {
-					// ---------- 第 1 行：工作目录 + 分支（accent）+ git 变更 + 会话名 ----------
+					// ---------- 第 2 行：工作目录 + 分支（accent）+ git 变更 + 会话名 + 扩展状态 ----------
 					const home = process.env.HOME || process.env.USERPROFILE;
 					const cwd = formatCwdForFooter(ctx.sessionManager.getCwd(), home);
 					const branch = footerData.getGitBranch();
@@ -181,7 +182,6 @@ export default function (pi: ExtensionAPI) {
 					if (sessionName) {
 						pwdLine += theme.fg("dim", ` • ${sessionName}`);
 					}
-					pwdLine = truncateToWidth(pwdLine, width, theme.fg("dim", "…"));
 
 					// ---------- 上下文占用：唯一带渐变仪表色的数据（行动阈值） ----------
 					const context = ctx.getContextUsage();
@@ -273,7 +273,7 @@ export default function (pi: ExtensionAPI) {
 						parts.push(theme.fg("dim", "订阅"));
 					}
 
-					// ---------- 第 2 行右侧：模型身份，accent 加粗；● 工作中 / ○ 待命 ----------
+					// ---------- 第 1 行右侧：模型身份，accent 加粗；● 工作中 / ○ 待命 ----------
 					const modelId = ctx.model?.id ?? "no-model";
 					const modelGlyph = running ? "●" : "○";
 					let right = theme.fg("accent", theme.bold(`${modelGlyph} ${modelId}`));
@@ -314,23 +314,25 @@ export default function (pi: ExtensionAPI) {
 					}
 
 					// 极窄：左段全丢后右侧仍超宽，截断右侧
+					let line1: string;
 					if (visibleWidth(right) > width) {
-						return [pwdLine, truncateToWidth(right, width, "…")];
+						line1 = truncateToWidth(right, width, "…");
+					} else {
+						const gap = " ".repeat(Math.max(1, width - visibleWidth(left) - rightWidth));
+						line1 = left === "" ? right : left + gap + right;
 					}
-					const gap = " ".repeat(Math.max(1, width - visibleWidth(left) - rightWidth));
-					const statsLine = left === "" ? right : left + gap + right;
-					const lines = [pwdLine, statsLine];
 
-					// ---------- 第 3 行：扩展状态（ctx.ui.setStatus 设置的内容） ----------
+					// 第 2 行：位置信息 + 扩展状态（ctx.ui.setStatus 设置的内容）合并，整体截断
 					const extensionStatuses = footerData.getExtensionStatuses();
 					if (extensionStatuses.size > 0) {
 						const statusLine = Array.from(extensionStatuses.entries())
 							.sort(([a], [b]) => a.localeCompare(b))
 							.map(([, text]) => sanitizeStatusText(text))
 							.join(" ");
-						lines.push(truncateToWidth(theme.fg("dim", statusLine), width, theme.fg("dim", "…")));
+						pwdLine += theme.fg("dim", ` · ${statusLine}`);
 					}
-					return lines;
+					const pwdLineFinal = truncateToWidth(pwdLine, width, theme.fg("dim", "…"));
+					return [line1, pwdLineFinal];
 				},
 			};
 		});
