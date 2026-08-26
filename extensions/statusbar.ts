@@ -257,19 +257,19 @@ export default function (pi: ExtensionAPI) {
 						parts.push(theme.fg("dim", `↑${formatTokens(totals.input)} ↓${formatTokens(totals.output)}`));
 					}
 					if (totals.cacheRead > 0 || totals.cacheWrite > 0) {
-						// 中文文案；0 值不显示（读0/写0 没有信息量）
+						// 图标化：⇣读 ⇡写 ⚡命中率（快/省钱的直觉符号）
 						const cacheBits: string[] = [];
-						if (totals.cacheRead > 0) cacheBits.push(`读${formatTokens(totals.cacheRead)}`);
-						if (totals.cacheWrite > 0) cacheBits.push(`写${formatTokens(totals.cacheWrite)}`);
+						if (totals.cacheRead > 0) cacheBits.push(`⇣${formatTokens(totals.cacheRead)}`);
+						if (totals.cacheWrite > 0) cacheBits.push(`⇡${formatTokens(totals.cacheWrite)}`);
 						if (latestCacheHitRate !== undefined) {
-							cacheBits.push(`缓存${latestCacheHitRate.toFixed(1)}%`);
+							cacheBits.push(`⚡${latestCacheHitRate.toFixed(1)}%`);
 						}
 						if (cacheBits.length > 0) parts.push(theme.fg("dim", cacheBits.join(" ")));
 					}
 					if (totals.cost > 0) {
 						parts.push(theme.fg("dim", `$${totals.cost.toFixed(3)}`));
 					} else if (ctx.model?.provider === "kimi-coding") {
-						parts.push(theme.fg("dim", "订阅"));
+						parts.push(theme.fg("dim", "∞")); // 订阅制：不限量
 					}
 
 					// ---------- 第 1 行右侧：模型身份，accent 加粗；● 工作中 / ○ 待命 ----------
@@ -291,7 +291,7 @@ export default function (pi: ExtensionAPI) {
 											: level === "xhigh"
 												? "thinkingXhigh"
 												: "thinkingMax";
-						right += theme.fg(thinkingColor, ` • 思考 ${level}`);
+						right += theme.fg(thinkingColor, ` • ${level}`);
 					}
 					const provider = ctx.model?.provider;
 					if (provider && footerData.getAvailableProviderCount() > 1) {
