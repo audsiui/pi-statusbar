@@ -1,23 +1,41 @@
 /**
  * 中文美化状态栏 —— 替换内置 footer。
  *
- * 设计原则（对齐内置 footer 的信息层级，保留调研结论）：
- * - 多行叙事：第 1 行工作目录/分支/会话名，第 2 行会话数据（左侧）
- *   + 模型身份（右侧 accent），第 3 行扩展状态（若有）。
- * - 颜色纪律：唯一使用语义色（黄/红）的是上下文占用 —— >70% 警告、>90% 危险；
- *   其余数据一律用 dim 保持安静，避免整条底栏像霓虹灯。
- * - 信息优先，装饰最后：分隔符只承担分组功能（·），进度条只表达占用比例（▰▱）。
- * - 窄屏降级：每行独立截断；第 2 行按价值从低到高逐段丢弃
- *   （成本 → 缓存 → 用量 → 进度条 → 上下文），绝不换行、不挤压。
- * - 状态变化克制：仅"工作中/待命"一个状态指示（●/○），每轮至多变化一次。
+ * 设计理念（调研自 Claude Code statusline 官方文档、claude-stat、
+ * note.com 用户实战、Calm Technology / Glanceable UX、Starship）：
+ *
+ * - 状态栏是"外围显示"（periphery）：inform without demanding。
+ *   扫一眼应能回答 4 个问题：我在哪 / 还能干多久 / 在烧多少钱 / 模型在什么状态。
+ * - 多行叙事：第 1 行位置感（目录/分支/git 变更），第 2 行仪表（上下文/用量/
+ *   缓存/成本）+ 右侧模型身份，第 3 行扩展状态（若有）。
+ * - 颜色 = 注意力线索，只在"有行动含义"处使用：
+ *   上下文占用是仪表 —— 渐变绿→黄→红（<50% 绿 / ≥50% 黄 / ≥80% 红），
+ *   阈值取社区实测的"行动阈值"（50% 清理对话、80% 开新会话），不是被动挨打阈值；
+ *   git 变更 +N ~M 是状态信号（绿=暂存 / 黄=已修改）。
+ *   其余数据一律 dim 保持安静。
+ * - thinking 级别是"智能程度"色阶（官方 thinkingOff→thinkingMax 主题色），
+ *   表达投入强度，不是危险度。
+ * - 上下文感知（Starship 原则）：git 段只在仓库内出现，思考级别只在
+ *   支持推理的模型上出现，一切按需展示。
+ * - 窄屏降级：每行独立截断；第 2 行按价值从低到高逐段丢弃，绝不换行。
+ * - 性能：git 状态异步拉取 + 缓存（GIT_OPTIONAL_LOCKS=0 不等待锁），
+ *   每 10s 与分支变化时刷新，渲染永远读缓存。
  */
 
+import { execFile } from "node:child_process";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 /** 进度条格子数（1 格 = 10%） */
 const BAR_CELLS = 10;
+
+/** 上下文占用行动阈值：≥50% 黄（开始清理/压缩），≥80% 红（准备开新会话） */
+const CONTEXT_WARN_PCT = 50;
+const CONTEXT_DANGER_PCT = 80;
+
+/** git 状态刷新间隔（毫秒） */
+const GIT_STATUS_INTERVAL_MS = 10_000;
 
 interface Totals {
 	input: number;
@@ -53,6 +71,43 @@ function sanitizeStatusText(text: string): string {
 	return text.replace(/[\r\n\t]/g, " ").replace(/ +/g, " ").trim();
 }
 
+/** 运行 git 命令，永不抛出；失败返回空串 */
+function runGit(cwd: string, args: string[]): Promise<string> {
+	return new Promise((resolvePromise) => {
+		execFile(
+			"git",
+			args,
+			{
+				cwd,
+				env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
+				timeout: 3000,
+			},
+			(err, stdout) => {
+				resolvePromise(err ? "" : stdout);
+			},
+		);
+	});
+}
+
+/**
+ * 解析 git status --porcelain：
+ * 每行 "XY path"，X=暂存区状态，Y=工作区状态；"??" 是未跟踪文件，不计入。
+ * 与内置 footer 口径一致的 staged(暂存) / modified(已修改) 计数。
+ */
+function parseGitStatus(out: string): { staged: number; modified: number } {
+	let staged = 0;
+	let modified = 0;
+	for (const line of out.split("\n")) {
+		if (line.length < 2) continue;
+		const x = line[0];
+		const y = line[1];
+		if (x !== " " && x !== "?") staged++;
+		if (y !== " " && y !== "?") modified++;
+	}
+	return { staged, modified };
+}
+
+
 export default function (pi: ExtensionAPI) {
 	let running = false;
 	let requestRender: (() => void) | undefined;
@@ -76,12 +131,38 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", (_event, ctx) => {
 		ctx.ui.setFooter((tui, theme, footerData) => {
 			requestRender = () => tui.requestRender();
-			const unsubBranch = footerData.onBranchChange(() => tui.requestRender());
+
+			// ---------- git 变更状态：异步拉取 + 缓存，渲染永不走磁盘 ----------
+			let gitStatus: { staged: number; modified: number } | undefined;
+			let disposed = false;
+			const refreshGitStatus = async (): Promise<void> => {
+				if (disposed) return;
+				if (footerData.getGitBranch() === null) {
+					// 不在 git 仓库：无状态可显示
+					gitStatus = undefined;
+					return;
+				}
+				const out = await runGit(ctx.sessionManager.getCwd(), ["status", "--porcelain"]);
+				if (disposed) return;
+				gitStatus = parseGitStatus(out);
+				requestRender?.();
+			};
+			void refreshGitStatus();
+			const gitRefreshTimer = setInterval(() => void refreshGitStatus(), GIT_STATUS_INTERVAL_MS);
+			const unsubBranch = footerData.onBranchChange(() => {
+				tui.requestRender();
+				void refreshGitStatus();
+			});
+
 			return {
-				dispose: () => unsubBranch(),
+				dispose: () => {
+					disposed = true;
+					clearInterval(gitRefreshTimer);
+					unsubBranch();
+				},
 				invalidate() {},
 				render(width: number): string[] {
-					// ---------- 第 1 行：工作目录 + 分支（accent）+ 会话名 ----------
+					// ---------- 第 1 行：工作目录 + 分支（accent）+ git 变更 + 会话名 ----------
 					const home = process.env.HOME || process.env.USERPROFILE;
 					const cwd = formatCwdForFooter(ctx.sessionManager.getCwd(), home);
 					const branch = footerData.getGitBranch();
@@ -89,13 +170,20 @@ export default function (pi: ExtensionAPI) {
 					let pwdLine = theme.fg("dim", cwd);
 					if (branch) {
 						pwdLine += ` ${theme.fg("accent", `⎇ ${branch}`)}`;
+						// 变更状态：+暂存(绿) ~已修改(黄)，无变更或不在仓库时不显示
+						if (gitStatus && (gitStatus.staged > 0 || gitStatus.modified > 0)) {
+							const bits: string[] = [];
+							if (gitStatus.staged > 0) bits.push(theme.fg("success", `+${gitStatus.staged}`));
+							if (gitStatus.modified > 0) bits.push(theme.fg("warning", `~${gitStatus.modified}`));
+							pwdLine += ` ${bits.join(" ")}`;
+						}
 					}
 					if (sessionName) {
 						pwdLine += theme.fg("dim", ` • ${sessionName}`);
 					}
 					pwdLine = truncateToWidth(pwdLine, width, theme.fg("dim", "…"));
 
-					// ---------- 上下文占用：唯一使用语义色的数据 ----------
+					// ---------- 上下文占用：唯一带渐变仪表色的数据（行动阈值） ----------
 					const context = ctx.getContextUsage();
 					const contextWindow = context?.contextWindow ?? ctx.model?.contextWindow ?? 0;
 					let contextPart: string | undefined;
@@ -107,8 +195,9 @@ export default function (pi: ExtensionAPI) {
 						} else {
 							const filled = Math.min(BAR_CELLS, Math.ceil((percent / 100) * BAR_CELLS));
 							const bar = "▰".repeat(filled) + "▱".repeat(BAR_CELLS - filled);
-							const color: "error" | "warning" | "dim" =
-								percent > 90 ? "error" : percent > 70 ? "warning" : "dim";
+							// 渐变仪表色：<50% 绿 / ≥50% 黄（行动）/ ≥80% 红（紧急）
+							const color: "success" | "warning" | "error" =
+								percent >= CONTEXT_DANGER_PCT ? "error" : percent >= CONTEXT_WARN_PCT ? "warning" : "success";
 							contextPart = theme.fg(
 								color,
 								`上下文 ${bar} ${percent.toFixed(1)}%/${formatTokens(contextWindow)}`,
@@ -147,7 +236,11 @@ export default function (pi: ExtensionAPI) {
 									latestCacheHitRate = ((u.cacheRead ?? 0) / promptTokens) * 100;
 								}
 							}
-						} else if (entry.type === "message" && entry.message.role === "toolResult" && entry.message.usage) {
+						} else if (
+							entry.type === "message" &&
+							entry.message.role === "toolResult" &&
+							entry.message.usage
+						) {
 							const u = entry.message.usage;
 							totals.input += u.input ?? 0;
 							totals.output += u.output ?? 0;
@@ -184,10 +277,22 @@ export default function (pi: ExtensionAPI) {
 					const modelId = ctx.model?.id ?? "no-model";
 					const modelGlyph = running ? "●" : "○";
 					let right = theme.fg("accent", theme.bold(`${modelGlyph} ${modelId}`));
-					// 模型支持推理时显示思考级别（同内置 footer）
-					if (ctx.model?.reasoning) {
-						const level = ctx.thinkingLevel ?? "off";
-						right += theme.fg("dim", ` • thinking ${level}`);
+					// 思考级别 = 智能程度色阶（官方 thinking* 主题色：灰→蓝→紫→品红递增）
+					if (ctx.model?.reasoning && ctx.thinkingLevel) {
+						const level = ctx.thinkingLevel;
+						const thinkingColor =
+							level === "minimal"
+								? "thinkingMinimal"
+								: level === "low"
+									? "thinkingLow"
+									: level === "medium"
+										? "thinkingMedium"
+										: level === "high"
+											? "thinkingHigh"
+											: level === "xhigh"
+												? "thinkingXhigh"
+												: "thinkingMax";
+						right += theme.fg(thinkingColor, ` • thinking ${level}`);
 					}
 					const provider = ctx.model?.provider;
 					if (provider && footerData.getAvailableProviderCount() > 1) {
