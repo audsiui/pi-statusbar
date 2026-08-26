@@ -257,15 +257,14 @@ export default function (pi: ExtensionAPI) {
 						parts.push(theme.fg("dim", `↑${formatTokens(totals.input)} ↓${formatTokens(totals.output)}`));
 					}
 					if (totals.cacheRead > 0 || totals.cacheWrite > 0) {
-						parts.push(
-							theme.fg(
-								"dim",
-								`R${formatTokens(totals.cacheRead)} W${formatTokens(totals.cacheWrite)}`,
-							),
-						);
+						// 中文文案；0 值不显示（读0/写0 没有信息量）
+						const cacheBits: string[] = [];
+						if (totals.cacheRead > 0) cacheBits.push(`读${formatTokens(totals.cacheRead)}`);
+						if (totals.cacheWrite > 0) cacheBits.push(`写${formatTokens(totals.cacheWrite)}`);
 						if (latestCacheHitRate !== undefined) {
-							parts.push(theme.fg("dim", `缓存${latestCacheHitRate.toFixed(1)}%`));
+							cacheBits.push(`缓存${latestCacheHitRate.toFixed(1)}%`);
 						}
+						if (cacheBits.length > 0) parts.push(theme.fg("dim", cacheBits.join(" ")));
 					}
 					if (totals.cost > 0) {
 						parts.push(theme.fg("dim", `$${totals.cost.toFixed(3)}`));
@@ -292,7 +291,7 @@ export default function (pi: ExtensionAPI) {
 											: level === "xhigh"
 												? "thinkingXhigh"
 												: "thinkingMax";
-						right += theme.fg(thinkingColor, ` • thinking ${level}`);
+						right += theme.fg(thinkingColor, ` • 思考 ${level}`);
 					}
 					const provider = ctx.model?.provider;
 					if (provider && footerData.getAvailableProviderCount() > 1) {
