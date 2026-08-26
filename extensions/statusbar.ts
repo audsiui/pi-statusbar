@@ -191,7 +191,7 @@ export default function (pi: ExtensionAPI) {
 						const percent = context?.percent;
 						if (percent === null || percent === undefined) {
 							// 压缩后 token 数未知，等待下一次 LLM 响应
-							contextPart = theme.fg("dim", `上下文 ?/${formatTokens(contextWindow)}`);
+							contextPart = theme.fg("dim", `?/${formatTokens(contextWindow)}`);
 						} else {
 							const filled = Math.min(BAR_CELLS, Math.ceil((percent / 100) * BAR_CELLS));
 							const bar = "▰".repeat(filled) + "▱".repeat(BAR_CELLS - filled);
@@ -200,7 +200,7 @@ export default function (pi: ExtensionAPI) {
 								percent >= CONTEXT_DANGER_PCT ? "error" : percent >= CONTEXT_WARN_PCT ? "warning" : "success";
 							contextPart = theme.fg(
 								color,
-								`上下文 ${bar} ${percent.toFixed(1)}%/${formatTokens(contextWindow)}`,
+								`${bar} ${percent.toFixed(1)}%/${formatTokens(contextWindow)}`,
 							);
 						}
 					}
