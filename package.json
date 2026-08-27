@@ -1,7 +1,7 @@
 {
   "name": "@audsiui/pi-statusbar",
-  "version": "1.4.4",
-  "description": "终端极简美学全套套件 —— 极客仪表盘 Header + 模型边框输入框 + 极致单行状态栏",
+  "version": "1.5.0",
+  "description": "Minimalist terminal aesthetic suite for Pi — clean startup header, model-border editor, and single-line statusbar",
   "keywords": [
     "pi-package",
     "extension",

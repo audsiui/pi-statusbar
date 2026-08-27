@@ -11,6 +11,7 @@ export class ModelBorderEditor extends CustomEditor {
 	private appTheme: Theme;
 	private getSpinnerFrame: () => string;
 	private getCurrentToolName: () => string | undefined;
+	private getLatestTps?: () => number | undefined;
 
 	constructor(
 		tui: TUI,
@@ -20,12 +21,14 @@ export class ModelBorderEditor extends CustomEditor {
 		appTheme: Theme,
 		getSpinnerFrame: () => string,
 		getCurrentToolName: () => string | undefined,
+		getLatestTps?: () => number | undefined,
 	) {
 		super(tui, theme, keybindings, { paddingX: 0 });
 		this.ctx = ctx;
 		this.appTheme = appTheme;
 		this.getSpinnerFrame = getSpinnerFrame;
 		this.getCurrentToolName = getCurrentToolName;
+		this.getLatestTps = getLatestTps;
 	}
 
 	render(width: number): string[] {
@@ -71,8 +74,11 @@ export class ModelBorderEditor extends CustomEditor {
 
 		const borderColor = (str: string) => this.borderColor(str);
 
-		// 顶边框：内嵌模型徽章与圆角 ╭─ ... ─╮
-		lines[0] = formatBorder(badge, "", width, borderColor, { left: "╭─", right: "─╮" });
+		// 顶边框：内嵌模型徽章（左）与生成速率 tok/s（右）
+		const tps = this.getLatestTps?.();
+		const rightBadge = tps && tps > 0 ? thm.fg("dim", `[ ${tps.toFixed(1)} tok/s ] `) : "";
+
+		lines[0] = formatBorder(badge, rightBadge, width, borderColor, { left: "╭─", right: "─╮" });
 
 		// 底边框：圆角 ╰─ ... ─╯，未激活补全时附带微提示
 		if (!this.isShowingAutocomplete()) {

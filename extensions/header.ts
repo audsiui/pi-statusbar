@@ -1,6 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Component, Theme, TUI } from "@earendil-works/pi-tui";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
@@ -13,7 +11,7 @@ function packItems(
 	maxRows: number,
 	theme: Theme,
 ): string[] {
-	if (items.length === 0) return [theme.fg("dim", "无")];
+	if (items.length === 0) return [theme.fg("dim", "none")];
 
 	const rows: string[][] = [];
 	let currentRow: string[] = [];
@@ -23,14 +21,13 @@ function packItems(
 	while (itemIdx < items.length) {
 		const item = items[itemIdx];
 		const itemW = visibleWidth(item);
-		const gap = currentRow.length > 0 ? 3 : 0; // 项目间留 3 个空格
+		const gap = currentRow.length > 0 ? 3 : 0;
 
 		const isLastRow = rows.length === maxRows - 1;
 		const remainingCount = items.length - itemIdx;
 
-		// 如果处于最后一行且还有多个项目，预留溢出标签位置
 		if (isLastRow && remainingCount > 1) {
-			const tag = `+${remainingCount} 更多`;
+			const tag = `+${remainingCount} more`;
 			const tagW = visibleWidth(tag);
 			if (currentWidth + gap + itemW + 3 + tagW > maxWidth) {
 				currentRow.push(theme.fg("accent", tag));
@@ -46,7 +43,7 @@ function packItems(
 			if (rows.length + 1 >= maxRows) {
 				const remaining = items.length - itemIdx;
 				if (remaining > 0) {
-					const overflowTag = theme.fg("accent", `+${remaining} 更多`);
+					const overflowTag = theme.fg("accent", `+${remaining} more`);
 					while (currentRow.length > 0 && currentWidth + 3 + visibleWidth(overflowTag) > maxWidth) {
 						const popped = currentRow.pop();
 						if (popped) currentWidth -= visibleWidth(popped) + 3;
@@ -69,189 +66,155 @@ function packItems(
 	return rows.map((r) => r.join("   "));
 }
 
-/** 消除紧随 header 之后的内置 [Skills]、[Prompts]、[Extensions] 容器，绝不误伤任何其他组件 */
-export function hideBuiltinResources(tui: any, myHeader?: any): void {
+/** 从官方 loadedResourcesContainer 的原有 children 中解析出真实的技能、模版与扩展列表 */
+function parseResourceChildren(children: any[]): {
+	skills: string[];
+	prompts: string[];
+	extensions: string[];
+} {
+	const skills: string[] = [];
+	const prompts: string[] = [];
+	const extensions: string[] = [];
+
+	for (const child of children) {
+		if (typeof child?.render === "function") {
+			try {
+				const lines = child.render(200);
+				if (lines.length >= 2) {
+					const headerLine = lines[0].replace(/\x1b\[[0-9;]*m/g, "").trim();
+					const bodyLine = lines.slice(1).join(" ").replace(/\x1b\[[0-9;]*m/g, "").trim();
+					if (headerLine.includes("[Skills]")) {
+						skills.push(...bodyLine.split(",").map((s: string) => s.trim()).filter(Boolean));
+					} else if (headerLine.includes("[Prompts]")) {
+						prompts.push(...bodyLine.split(",").map((s: string) => s.trim()).filter(Boolean));
+					} else if (headerLine.includes("[Extensions]")) {
+						extensions.push(
+							...bodyLine
+								.split(",")
+								.map((s: string) => {
+									const cleaned = cleanPackageName(s);
+									return cleaned === "extensions" ? "pi-statusbar" : cleaned;
+								})
+								.filter(Boolean),
+						);
+					}
+				}
+			} catch {}
+		}
+	}
+	return { skills, prompts, extensions };
+}
+
+/** 渲染美化后的资源卡片（统一线框标题、纯粹排版、与输入框一致的圆角设计） */
+function renderResourceCard(
+	items: { skills: string[]; prompts: string[]; extensions: string[] },
+	width: number,
+	theme: Theme,
+): string[] {
+	const cardWidth = Math.max(40, Math.min(width - 4, 86));
+	const innerWidth = cardWidth - 6;
+	const lines: string[] = [];
+
+	const formatDivider = (title: string, count: number, left: string, right: string) => {
+		const label = `${title} (${count})`;
+		const labelW = visibleWidth(label);
+		const fillW = Math.max(2, innerWidth + 1 - labelW);
+		return `  ${left}─ ${theme.fg("accent", title)} ${theme.fg("dim", `(${count})`)} ${theme.fg("dim", "─".repeat(fillW))}${right}`;
+	};
+
+	const padRow = (content: string) => {
+		const cWidth = visibleWidth(content);
+		const padding = " ".repeat(Math.max(0, innerWidth - cWidth));
+		return `  │  ${content}${padding}  │`;
+	};
+
+	// 1. Extensions
+	if (items.extensions.length > 0) {
+		lines.push(formatDivider("Extensions", items.extensions.length, "╭", "╮"));
+		const pkgRows = packItems(items.extensions.map((p) => theme.fg("dim", `• ${p}`)), innerWidth, 2, theme);
+		for (const r of pkgRows) lines.push(padRow(r));
+	}
+
+	// 2. Skills
+	if (items.skills.length > 0) {
+		const isFirstSection = lines.length === 0;
+		const left = isFirstSection ? "╭" : "├";
+		const right = isFirstSection ? "╮" : "┤";
+		lines.push(formatDivider("Skills", items.skills.length, left, right));
+		const skillRows = packItems(items.skills.map((s) => theme.fg("dim", `• ${s}`)), innerWidth, 2, theme);
+		for (const r of skillRows) lines.push(padRow(r));
+	}
+
+	// 3. Prompts
+	if (items.prompts.length > 0) {
+		const isFirstSection = lines.length === 0;
+		const left = isFirstSection ? "╭" : "├";
+		const right = isFirstSection ? "╮" : "┤";
+		lines.push(formatDivider("Prompts", items.prompts.length, left, right));
+		const promptRows = packItems(items.prompts.map((p) => theme.fg("dim", `• ${p}`)), innerWidth, 2, theme);
+		for (const r of promptRows) lines.push(padRow(r));
+	}
+
+	// 底边框
+	if (lines.length > 0) {
+		lines.push(`  ╰${theme.fg("dim", "─".repeat(innerWidth + 4))}╯`);
+		lines.push("");
+	}
+
+	return lines.map((l) => truncateToWidth(l, width));
+}
+
+/** 拦截并重新实现官方 loadedResourcesContainer 的 UI，完成无侵入美化 */
+export function beautifyLoadedResources(tui: any, theme: Theme): void {
 	try {
-		// 路径 1：交互模式下 tui.children[0] 即为 documentContainer，其 children[1] 即为 loadedResourcesContainer
 		const doc = tui?.children?.[0];
 		if (doc && Array.isArray(doc.children) && doc.children.length >= 2) {
 			const loadedRes = doc.children[1];
-			if (loadedRes) {
-				if (typeof loadedRes.clear === "function") loadedRes.clear();
-				loadedRes.render = () => [];
-			}
-		}
-
-		// 路径 2：精准通过 headerContainer 寻找同级紧随其后的容器
-		for (const comp of tui?.children ?? []) {
-			if (Array.isArray(comp?.children)) {
-				const headerContainer = comp.children.find(
-					(c: any) =>
-						c === myHeader || (Array.isArray(c?.children) && c.children.includes(myHeader)),
-				);
-				if (headerContainer) {
-					const idx = comp.children.indexOf(headerContainer);
-					const loadedRes = comp.children[idx + 1];
-					if (loadedRes) {
-						if (typeof loadedRes.clear === "function") loadedRes.clear();
-						loadedRes.render = () => [];
+			if (loadedRes && !loadedRes._customBeautified) {
+				loadedRes._customBeautified = true;
+				// 保留官方原始 children 供数据读取
+				loadedRes.render = function (width: number): string[] {
+					const items = parseResourceChildren(this.children ?? []);
+					if (
+						items.extensions.length === 0 &&
+						items.skills.length === 0 &&
+						items.prompts.length === 0
+					) {
+						return [];
 					}
-				}
+					return renderResourceCard(items, width, theme);
+				};
 			}
 		}
 	} catch {}
 }
 
+/** 极简 Header 组件：只负责显示顶部简洁优雅的 π 标识，不再冗余堆叠卡片 */
 export class DashboardHeader implements Component {
 	private ctx: ExtensionContext;
 	public tui: TUI;
 	private theme: Theme;
-	private packages: string[] = [];
-	private skills: string[] = [];
-	private prompts: string[] = [];
 
 	constructor(ctx: ExtensionContext, tui: TUI, theme: Theme) {
 		this.ctx = ctx;
 		this.tui = tui;
 		this.theme = theme;
-		hideBuiltinResources(tui, this);
-		this.loadResources();
+		beautifyLoadedResources(tui, theme);
 	}
 
 	invalidate(): void {}
 
-	private loadResources(): void {
-		try {
-			const home = homedir();
-			const globalSettingsPath = join(home, ".pi", "agent", "settings.json");
-			const projectSettingsPath = join(this.ctx.cwd, ".pi", "settings.json");
-
-			const rawPackages: string[] = [];
-
-			if (existsSync(globalSettingsPath)) {
-				try {
-					const data = JSON.parse(readFileSync(globalSettingsPath, "utf8"));
-					if (Array.isArray(data.packages)) {
-						rawPackages.push(...data.packages);
-					}
-				} catch {}
-			}
-
-			if (existsSync(projectSettingsPath)) {
-				try {
-					const data = JSON.parse(readFileSync(projectSettingsPath, "utf8"));
-					if (Array.isArray(data.packages)) {
-						rawPackages.push(...data.packages);
-					}
-				} catch {}
-			}
-
-			// 洗净并去重包名
-			const extSet = new Set<string>();
-			for (const pkg of rawPackages) {
-				const cleaned = cleanPackageName(pkg);
-				if (cleaned) extSet.add(cleaned);
-			}
-			extSet.add("pi-statusbar");
-			this.packages = Array.from(extSet);
-
-			// 技能推导与洗净
-			const skillSet = new Set<string>();
-			for (const p of this.packages) {
-				if (p.includes("codegraph")) skillSet.add("codegraph");
-				if (p.includes("keenable")) skillSet.add("keenable-search");
-				if (p.includes("subagent")) skillSet.add("pi-subagents");
-				if (p.includes("council")) skillSet.add("council-mode");
-			}
-			this.skills = Array.from(skillSet);
-
-			// 常用指令模版
-			const promptSet = new Set<string>();
-			if (this.packages.some((p) => p.includes("todo"))) promptSet.add("/todos");
-			if (this.packages.some((p) => p.includes("plan"))) promptSet.add("/plan");
-			if (this.packages.some((p) => p.includes("goal"))) promptSet.add("/goal");
-			if (this.skills.includes("council-mode")) promptSet.add("/council");
-			promptSet.add("/review-loop");
-			promptSet.add("/cleanup");
-			this.prompts = Array.from(promptSet);
-		} catch {
-			this.packages = ["pi-statusbar"];
-		}
-	}
-
 	render(width: number): string[] {
+		beautifyLoadedResources(this.tui, this.theme);
 		const theme = this.theme;
 		const home = homedir();
 		const cwdStr = formatCwdForFooter(this.ctx.cwd, home);
-		const rows = this.tui.terminal.rows || 30;
+		const title = `${theme.fg("accent", theme.bold("π"))} ${theme.fg("dim", "·")} ${theme.fg("muted", cwdStr)}`;
 
-		const lines: string[] = [];
-
-		// 消除原先重复平铺在下方的内置 [Skills]、[Prompts]、[Extensions]
-		hideBuiltinResources(this.tui, this);
-
-		// 1. 现代极简品牌标识（摒弃粗笨的 ASCII 字符画）
-		const title = `${theme.fg("accent", theme.bold("π coding agent"))} ${theme.fg("dim", "·")} ${theme.fg("muted", cwdStr)}`;
-		const subtitle = theme.fg("dim", `就绪: ${this.packages.length} 个扩展 · ${this.skills.length} 个技能 · ${this.prompts.length} 个模版`);
-
-		lines.push("");
-		lines.push(`  ${title}`);
-		lines.push(`  ${subtitle}`);
-		lines.push("");
-
-		// 2. 屏幕高度保护：超矮屏降级为极简单行
-		if (rows < 24) {
-			const compactLine = theme.fg(
-				"dim",
-				`  🧩 ${this.packages.length} 扩展 · ⚡ ${this.skills.length} 技能 · 💬 ${this.prompts.length} 模版`,
-			);
-			lines.push(compactLine);
-			lines.push("");
-			return lines.map((l) => truncateToWidth(l, width));
-		}
-
-		// 3. 严格边界对齐的自适应卡片容器
-		// 容器总宽度（含边框）：cardWidth
-		// 内部文字宽度：innerWidth = cardWidth - 6 (两边空 2 格 + 边框 2 格)
-		const cardWidth = Math.max(40, Math.min(width - 4, 86));
-		const innerWidth = cardWidth - 6;
-
-		// 顶边框
-		const headerTitle = `🧩 扩展组件 (${this.packages.length})`;
-		const headerTitleW = visibleWidth(headerTitle);
-		const topFill = "─".repeat(Math.max(2, innerWidth + 1 - headerTitleW));
-		lines.push(`  ┌─ ${theme.fg("accent", "🧩 扩展组件")} ${theme.fg("dim", `(${this.packages.length})`)} ${theme.fg("dim", topFill)}┐`);
-
-		// 包装每行文字并确保右侧边框对齐
-		const padRow = (content: string) => {
-			const cWidth = visibleWidth(content);
-			const padding = " ".repeat(Math.max(0, innerWidth - cWidth));
-			return `  │  ${content}${padding}  │`;
-		};
-
-		// 扩展组件列表（最多 2 行）
-		const pkgItems = this.packages.map((p) => theme.fg("dim", `• ${p}`));
-		const pkgRows = packItems(pkgItems, innerWidth, 2, theme);
-		for (const r of pkgRows) {
-			lines.push(padRow(r));
-		}
-
-		// 分割线
-		lines.push(`  ├${theme.fg("dim", "─".repeat(innerWidth + 4))}┤`);
-
-		// 技能与指令列表（各 1 行）
-		const skillItems = this.skills.map((s) => theme.fg("dim", `• ${s}`));
-		const skillRow = packItems(skillItems, innerWidth - 4, 1, theme)[0];
-		lines.push(padRow(`${theme.fg("accent", "⚡")}  ${skillRow}`));
-
-		const promptItems = this.prompts.map((p) => theme.fg("dim", `• ${p}`));
-		const promptRow = packItems(promptItems, innerWidth - 4, 1, theme)[0];
-		lines.push(padRow(`${theme.fg("accent", "💬")}  ${promptRow}`));
-
-		// 底边框
-		lines.push(`  └${theme.fg("dim", "─".repeat(innerWidth + 4))}┘`);
-		lines.push("");
-
-		return lines.map((l) => truncateToWidth(l, width));
+		return [
+			"",
+			`  ${title}`,
+			"",
+		];
 	}
 }

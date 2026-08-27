@@ -140,13 +140,21 @@ export class SingleLineStatusbar implements Component {
 		}
 
 		const totals = this.getTotals();
-		const rightParts: string[] = [];
-		if (contextPart) rightParts.push(contextPart);
+		const auxParts: string[] = [];
+
+		const extensionStatuses = this.footerData.getExtensionStatuses();
+		if (extensionStatuses.size > 0) {
+			const statusLine = Array.from(extensionStatuses.entries())
+				.sort(([a], [b]) => a.localeCompare(b))
+				.map(([, text]) => sanitizeStatusText(text))
+				.join(" ");
+			auxParts.push(theme.fg("dim", `[${statusLine}]`));
+		}
 
 		if (totals.cost > 0) {
-			rightParts.push(theme.fg("dim", `$${totals.cost.toFixed(3)}`));
+			auxParts.push(theme.fg("dim", `$${totals.cost.toFixed(3)}`));
 		} else if (ctx.model?.provider === "kimi-coding") {
-			rightParts.push(theme.fg("dim", "∞"));
+			auxParts.push(theme.fg("dim", "∞"));
 		}
 
 		if (totals.cacheRead > 0 || totals.cacheWrite > 0) {
@@ -156,30 +164,26 @@ export class SingleLineStatusbar implements Component {
 			if (totals.latestCacheHitRate !== undefined) {
 				cacheBits.push(`⚡${totals.latestCacheHitRate.toFixed(1)}%`);
 			}
-			if (cacheBits.length > 0) rightParts.push(theme.fg("dim", cacheBits.join(" ")));
+			if (cacheBits.length > 0) auxParts.push(theme.fg("dim", cacheBits.join(" ")));
 		}
 
 		if (totals.input > 0 || totals.output > 0) {
-			rightParts.push(theme.fg("dim", `↑${formatTokens(totals.input)} ↓${formatTokens(totals.output)}`));
-		}
-
-		const extensionStatuses = this.footerData.getExtensionStatuses();
-		if (extensionStatuses.size > 0) {
-			const statusLine = Array.from(extensionStatuses.entries())
-				.sort(([a], [b]) => a.localeCompare(b))
-				.map(([, text]) => sanitizeStatusText(text))
-				.join(" ");
-			rightParts.push(theme.fg("dim", `[${statusLine}]`));
+			auxParts.push(theme.fg("dim", `↑${formatTokens(totals.input)} ↓${formatTokens(totals.output)}`));
 		}
 
 		const separator = theme.fg("dim", " · ");
-		let right = rightParts.join(separator);
 
-		// 响应式单行收缩：空间紧张时从右端末尾逐步丢弃辅助指标
-		while (rightParts.length > 0 && visibleWidth(left) + visibleWidth(right) + 2 > width) {
-			rightParts.pop();
-			right = rightParts.join(separator);
+		// 响应式单行收缩：空间紧张时从左向右逐步丢弃辅助指标，优先保全最右端的上下文进度条
+		while (auxParts.length > 0) {
+			const candidateRight = (contextPart ? [...auxParts, contextPart] : auxParts).join(separator);
+			if (visibleWidth(left) + visibleWidth(candidateRight) + 2 <= width) {
+				break;
+			}
+			auxParts.shift();
 		}
+
+		const rightParts = contextPart ? [...auxParts, contextPart] : auxParts;
+		let right = rightParts.join(separator);
 
 		// 如果左侧过长，收缩左侧
 		const rightWidth = visibleWidth(right);
