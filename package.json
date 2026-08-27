@@ -1,7 +1,7 @@
 {
   "name": "@audsiui/pi-statusbar",
-  "version": "1.2.0",
-  "description": "优雅高效的状态栏扩展 —— 替换内置 footer：会话用量/缓存/成本/上下文占用 + 模型身份",
+  "version": "1.3.0",
+  "description": "优雅的单行状态栏 + 模型边框输入框扩展 —— 将模型锚定在输入框，底部释放为极简单行遥测",
   "keywords": [
     "pi-package",
     "extension",
