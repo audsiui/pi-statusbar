@@ -69,6 +69,40 @@ function packItems(
 	return rows.map((r) => r.join("   "));
 }
 
+/** 深度遍历 TUI 组件树，消除内置重复渲染的 [Skills]、[Prompts]、[Extensions] 容器 */
+function hideBuiltinResources(node: any, depth = 0): void {
+	if (!node || depth > 8) return;
+	const children = node.children ?? node.component?.children;
+	if (Array.isArray(children)) {
+		for (let i = 0; i < children.length; i++) {
+			const item = children[i]?.component ?? children[i];
+			if (item && typeof item.render === "function") {
+				try {
+					const rendered = item.render(80);
+					if (
+						Array.isArray(rendered) &&
+						rendered.some(
+							(line: string) =>
+								typeof line === "string" &&
+								(line.includes("[Skills]") ||
+									line.includes("[Extensions]") ||
+									line.includes("[Prompts]")),
+						)
+					) {
+						if (typeof item.clear === "function") {
+							item.clear();
+						} else {
+							children[i] = { render: () => [], invalidate: () => {} };
+						}
+					}
+				} catch {}
+			}
+			hideBuiltinResources(children[i], depth + 1);
+			hideBuiltinResources(children[i]?.component, depth + 1);
+		}
+	}
+}
+
 export class DashboardHeader implements Component {
 	private ctx: ExtensionContext;
 	public tui: TUI;
@@ -153,15 +187,16 @@ export class DashboardHeader implements Component {
 
 		const lines: string[] = [];
 
-		// 1. 紧凑型品牌标识与项目信息
-		const logoGlyph = theme.fg("accent", "  ┌─┐┬  \n  ├─┘│  \n  ┴  ┴  ");
-		const title = `${theme.fg("accent", theme.bold("π coding agent"))} ${theme.fg("dim", "·")} ${theme.fg("dim", cwdStr)}`;
+		// 消除原先重复平铺在下方的内置 [Skills]、[Prompts]、[Extensions]
+		hideBuiltinResources(this.tui);
+
+		// 1. 现代极简品牌标识（摒弃粗笨的 ASCII 字符画）
+		const title = `${theme.fg("accent", theme.bold("π coding agent"))} ${theme.fg("dim", "·")} ${theme.fg("muted", cwdStr)}`;
 		const subtitle = theme.fg("dim", `就绪: ${this.packages.length} 个扩展 · ${this.skills.length} 个技能 · ${this.prompts.length} 个模版`);
 
-		const logoLines = logoGlyph.split("\n");
-		lines.push(`${logoLines[0]}`);
-		lines.push(`${logoLines[1]}${title}`);
-		lines.push(`${logoLines[2]}${subtitle}`);
+		lines.push("");
+		lines.push(`  ${title}`);
+		lines.push(`  ${subtitle}`);
 		lines.push("");
 
 		// 2. 屏幕高度保护：超矮屏降级为极简单行
