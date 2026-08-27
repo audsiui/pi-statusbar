@@ -69,21 +69,33 @@ function packItems(
 	return rows.map((r) => r.join("   "));
 }
 
-/** 仅精准消除紧随 header 之后的内置 [Skills]、[Prompts]、[Extensions] 容器，绝不误伤父级 documentContainer */
-function hideBuiltinResources(tui: any, myHeader: any): void {
+/** 消除紧随 header 之后的内置 [Skills]、[Prompts]、[Extensions] 容器，绝不误伤任何其他组件 */
+export function hideBuiltinResources(tui: any, myHeader?: any): void {
 	try {
-		const root = tui?.children?.[0];
-		const doc = root?.entries?.[0]?.component ?? root?.children?.[0]?.component ?? root?.children?.[0];
+		// 路径 1：交互模式下 tui.children[0] 即为 documentContainer，其 children[1] 即为 loadedResourcesContainer
+		const doc = tui?.children?.[0];
 		if (doc && Array.isArray(doc.children) && doc.children.length >= 2) {
-			const headerIdx = doc.children.findIndex((c: any) => {
-				if (c === myHeader) return true;
-				if (Array.isArray(c?.children) && c.children.includes(myHeader)) return true;
-				return false;
-			});
-			if (headerIdx !== -1 && doc.children.length > headerIdx + 1) {
-				const loadedRes = doc.children[headerIdx + 1];
-				if (loadedRes && typeof loadedRes.clear === "function") {
-					loadedRes.clear();
+			const loadedRes = doc.children[1];
+			if (loadedRes) {
+				if (typeof loadedRes.clear === "function") loadedRes.clear();
+				loadedRes.render = () => [];
+			}
+		}
+
+		// 路径 2：精准通过 headerContainer 寻找同级紧随其后的容器
+		for (const comp of tui?.children ?? []) {
+			if (Array.isArray(comp?.children)) {
+				const headerContainer = comp.children.find(
+					(c: any) =>
+						c === myHeader || (Array.isArray(c?.children) && c.children.includes(myHeader)),
+				);
+				if (headerContainer) {
+					const idx = comp.children.indexOf(headerContainer);
+					const loadedRes = comp.children[idx + 1];
+					if (loadedRes) {
+						if (typeof loadedRes.clear === "function") loadedRes.clear();
+						loadedRes.render = () => [];
+					}
 				}
 			}
 		}
@@ -102,6 +114,7 @@ export class DashboardHeader implements Component {
 		this.ctx = ctx;
 		this.tui = tui;
 		this.theme = theme;
+		hideBuiltinResources(tui, this);
 		this.loadResources();
 	}
 

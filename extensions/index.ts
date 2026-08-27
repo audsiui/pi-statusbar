@@ -2,7 +2,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { TUI } from "@earendil-works/pi-tui";
 import { ModelBorderEditor } from "./editor.ts";
 import { SingleLineStatusbar } from "./footer.ts";
-import { DashboardHeader } from "./header.ts";
+import { DashboardHeader, hideBuiltinResources } from "./header.ts";
 
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -90,6 +90,7 @@ export default function (pi: ExtensionAPI) {
 		// 2. 迎宾台：极客仪表盘 Header (带 2 行阈值保护与溢出折叠)
 		ctx.ui.setHeader((tui, theme) => {
 			activeTui = tui;
+			hideBuiltinResources(tui);
 			return new DashboardHeader(ctx, tui, theme);
 		});
 
