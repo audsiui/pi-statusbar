@@ -69,38 +69,25 @@ function packItems(
 	return rows.map((r) => r.join("   "));
 }
 
-/** 深度遍历 TUI 组件树，消除内置重复渲染的 [Skills]、[Prompts]、[Extensions] 容器 */
-function hideBuiltinResources(node: any, depth = 0): void {
-	if (!node || depth > 8) return;
-	const children = node.children ?? node.component?.children;
-	if (Array.isArray(children)) {
-		for (let i = 0; i < children.length; i++) {
-			const item = children[i]?.component ?? children[i];
-			if (item && typeof item.render === "function") {
-				try {
-					const rendered = item.render(80);
-					if (
-						Array.isArray(rendered) &&
-						rendered.some(
-							(line: string) =>
-								typeof line === "string" &&
-								(line.includes("[Skills]") ||
-									line.includes("[Extensions]") ||
-									line.includes("[Prompts]")),
-						)
-					) {
-						if (typeof item.clear === "function") {
-							item.clear();
-						} else {
-							children[i] = { render: () => [], invalidate: () => {} };
-						}
-					}
-				} catch {}
+/** 仅精准消除紧随 header 之后的内置 [Skills]、[Prompts]、[Extensions] 容器，绝不误伤父级 documentContainer */
+function hideBuiltinResources(tui: any, myHeader: any): void {
+	try {
+		const root = tui?.children?.[0];
+		const doc = root?.entries?.[0]?.component ?? root?.children?.[0]?.component ?? root?.children?.[0];
+		if (doc && Array.isArray(doc.children) && doc.children.length >= 2) {
+			const headerIdx = doc.children.findIndex((c: any) => {
+				if (c === myHeader) return true;
+				if (Array.isArray(c?.children) && c.children.includes(myHeader)) return true;
+				return false;
+			});
+			if (headerIdx !== -1 && doc.children.length > headerIdx + 1) {
+				const loadedRes = doc.children[headerIdx + 1];
+				if (loadedRes && typeof loadedRes.clear === "function") {
+					loadedRes.clear();
+				}
 			}
-			hideBuiltinResources(children[i], depth + 1);
-			hideBuiltinResources(children[i]?.component, depth + 1);
 		}
-	}
+	} catch {}
 }
 
 export class DashboardHeader implements Component {
@@ -188,7 +175,7 @@ export class DashboardHeader implements Component {
 		const lines: string[] = [];
 
 		// 消除原先重复平铺在下方的内置 [Skills]、[Prompts]、[Extensions]
-		hideBuiltinResources(this.tui);
+		hideBuiltinResources(this.tui, this);
 
 		// 1. 现代极简品牌标识（摒弃粗笨的 ASCII 字符画）
 		const title = `${theme.fg("accent", theme.bold("π coding agent"))} ${theme.fg("dim", "·")} ${theme.fg("muted", cwdStr)}`;
