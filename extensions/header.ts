@@ -6,16 +6,81 @@ import type { Component, Theme, TUI } from "@earendil-works/pi-tui";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { cleanPackageName, formatCwdForFooter } from "./utils/format.ts";
 
+/** 将一组项目根据最大可用宽度自动流式排列，严格保证不超过 maxWidth，超出行数则附加溢出标签 */
+function packItems(
+	items: string[],
+	maxWidth: number,
+	maxRows: number,
+	theme: Theme,
+): string[] {
+	if (items.length === 0) return [theme.fg("dim", "无")];
+
+	const rows: string[][] = [];
+	let currentRow: string[] = [];
+	let currentWidth = 0;
+	let itemIdx = 0;
+
+	while (itemIdx < items.length) {
+		const item = items[itemIdx];
+		const itemW = visibleWidth(item);
+		const gap = currentRow.length > 0 ? 3 : 0; // 项目间留 3 个空格
+
+		const isLastRow = rows.length === maxRows - 1;
+		const remainingCount = items.length - itemIdx;
+
+		// 如果处于最后一行且还有多个项目，预留溢出标签位置
+		if (isLastRow && remainingCount > 1) {
+			const tag = `+${remainingCount} 更多`;
+			const tagW = visibleWidth(tag);
+			if (currentWidth + gap + itemW + 3 + tagW > maxWidth) {
+				currentRow.push(theme.fg("accent", tag));
+				break;
+			}
+		}
+
+		if (currentWidth + gap + itemW <= maxWidth) {
+			currentRow.push(item);
+			currentWidth += gap + itemW;
+			itemIdx++;
+		} else {
+			if (rows.length + 1 >= maxRows) {
+				const remaining = items.length - itemIdx;
+				if (remaining > 0) {
+					const overflowTag = theme.fg("accent", `+${remaining} 更多`);
+					while (currentRow.length > 0 && currentWidth + 3 + visibleWidth(overflowTag) > maxWidth) {
+						const popped = currentRow.pop();
+						if (popped) currentWidth -= visibleWidth(popped) + 3;
+					}
+					currentRow.push(overflowTag);
+				}
+				break;
+			}
+			rows.push(currentRow);
+			currentRow = [item];
+			currentWidth = itemW;
+			itemIdx++;
+		}
+	}
+
+	if (currentRow.length > 0 && rows.length < maxRows) {
+		rows.push(currentRow);
+	}
+
+	return rows.map((r) => r.join("   "));
+}
+
 export class DashboardHeader implements Component {
+	private ctx: ExtensionContext;
+	public tui: TUI;
+	private theme: Theme;
 	private packages: string[] = [];
 	private skills: string[] = [];
 	private prompts: string[] = [];
 
-	constructor(
-		private ctx: ExtensionContext,
-		public tui: TUI,
-		private theme: Theme,
-	) {
+	constructor(ctx: ExtensionContext, tui: TUI, theme: Theme) {
+		this.ctx = ctx;
+		this.tui = tui;
+		this.theme = theme;
 		this.loadResources();
 	}
 
@@ -47,17 +112,16 @@ export class DashboardHeader implements Component {
 				} catch {}
 			}
 
-			// Clean and deduplicate package names
+			// 洗净并去重包名
 			const extSet = new Set<string>();
 			for (const pkg of rawPackages) {
 				const cleaned = cleanPackageName(pkg);
 				if (cleaned) extSet.add(cleaned);
 			}
-			// Always include pi-statusbar
 			extSet.add("pi-statusbar");
 			this.packages = Array.from(extSet);
 
-			// Common skills & prompts detection from packages
+			// 技能推导与洗净
 			const skillSet = new Set<string>();
 			for (const p of this.packages) {
 				if (p.includes("codegraph")) skillSet.add("codegraph");
@@ -67,15 +131,14 @@ export class DashboardHeader implements Component {
 			}
 			this.skills = Array.from(skillSet);
 
-			const promptSet = new Set<string>([
-				"/council",
-				"/review-loop",
-				"/cleanup",
-				"/research",
-			]);
+			// 常用指令模版
+			const promptSet = new Set<string>();
 			if (this.packages.some((p) => p.includes("todo"))) promptSet.add("/todos");
 			if (this.packages.some((p) => p.includes("plan"))) promptSet.add("/plan");
 			if (this.packages.some((p) => p.includes("goal"))) promptSet.add("/goal");
+			if (this.skills.includes("council-mode")) promptSet.add("/council");
+			promptSet.add("/review-loop");
+			promptSet.add("/cleanup");
 			this.prompts = Array.from(promptSet);
 		} catch {
 			this.packages = ["pi-statusbar"];
@@ -90,87 +153,70 @@ export class DashboardHeader implements Component {
 
 		const lines: string[] = [];
 
-		// 1. Logo & App Info
+		// 1. 紧凑型品牌标识与项目信息
 		const logoGlyph = theme.fg("accent", "  ┌─┐┬  \n  ├─┘│  \n  ┴  ┴  ");
 		const title = `${theme.fg("accent", theme.bold("π coding agent"))} ${theme.fg("dim", "·")} ${theme.fg("dim", cwdStr)}`;
 		const subtitle = theme.fg("dim", `就绪: ${this.packages.length} 个扩展 · ${this.skills.length} 个技能 · ${this.prompts.length} 个模版`);
 
-		// Split logoGlyph into lines
 		const logoLines = logoGlyph.split("\n");
 		lines.push(`${logoLines[0]}`);
 		lines.push(`${logoLines[1]}${title}`);
 		lines.push(`${logoLines[2]}${subtitle}`);
 		lines.push("");
 
-		// 2. Keybinding Pills
-		const pill = (key: string, label: string) =>
-			`${theme.fg("accent", `[${key}]`)} ${theme.fg("muted", label)}`;
-		const pills = [
-			pill(" / ", "指令菜单"),
-			pill(" ! ", "运行终端"),
-			pill("Alt+M", "切换模型"),
-			pill("Ctrl+P", "命令面板"),
-		].join("    ");
-
-		lines.push(`  ${pills}`);
-		lines.push("");
-
-		// 3. Adaptive Cards (If terminal is compact < 26 rows, render slim chips instead)
-		if (rows < 26) {
+		// 2. 屏幕高度保护：超矮屏降级为极简单行
+		if (rows < 24) {
 			const compactLine = theme.fg(
 				"dim",
-				`  🧩 ${this.packages.length} 扩展 · ⚡ ${this.skills.length} 技能 · 💬 ${this.prompts.length} 模版 (按 Ctrl+O 查看详情)`,
+				`  🧩 ${this.packages.length} 扩展 · ⚡ ${this.skills.length} 技能 · 💬 ${this.prompts.length} 模版`,
 			);
 			lines.push(compactLine);
 			lines.push("");
 			return lines.map((l) => truncateToWidth(l, width));
 		}
 
-		// Full Card Box with 2-row ceiling & overflow tag
-		const cardWidth = Math.min(width - 4, 82);
-		if (cardWidth > 40) {
-			const topBorder = `  ┌─ ${theme.fg("accent", "🧩 扩展组件")} ${theme.fg("dim", `(${this.packages.length})`)} ${"─".repeat(Math.max(2, cardWidth - 20))}┐`;
-			lines.push(topBorder);
+		// 3. 严格边界对齐的自适应卡片容器
+		// 容器总宽度（含边框）：cardWidth
+		// 内部文字宽度：innerWidth = cardWidth - 6 (两边空 2 格 + 边框 2 格)
+		const cardWidth = Math.max(40, Math.min(width - 4, 86));
+		const innerWidth = cardWidth - 6;
 
-			// Render packages (max 6 items = 2 rows of 3-4 items)
-			const MAX_PKGS = 6;
-			const displayPkgs = this.packages.slice(0, MAX_PKGS);
-			const overflow = this.packages.length - MAX_PKGS;
+		// 顶边框
+		const headerTitle = `🧩 扩展组件 (${this.packages.length})`;
+		const headerTitleW = visibleWidth(headerTitle);
+		const topFill = "─".repeat(Math.max(2, innerWidth + 1 - headerTitleW));
+		lines.push(`  ┌─ ${theme.fg("accent", "🧩 扩展组件")} ${theme.fg("dim", `(${this.packages.length})`)} ${theme.fg("dim", topFill)}┐`);
 
-			const pkgItems = displayPkgs.map((p) => theme.fg("dim", `• ${p}`));
-			if (overflow > 0) {
-				pkgItems.push(theme.fg("accent", `+${overflow} 更多 (Ctrl+O)`));
-			}
+		// 包装每行文字并确保右侧边框对齐
+		const padRow = (content: string) => {
+			const cWidth = visibleWidth(content);
+			const padding = " ".repeat(Math.max(0, innerWidth - cWidth));
+			return `  │  ${content}${padding}  │`;
+		};
 
-			// Format into 1-2 rows
-			const midIndex = Math.ceil(pkgItems.length / 2);
-			const row1 = pkgItems.slice(0, midIndex).join("    ");
-			const row2 = pkgItems.slice(midIndex).join("    ");
-
-			const padRow = (content: string) => {
-				const innerW = cardWidth - 2;
-				const curW = visibleWidth(content);
-				const pad = " ".repeat(Math.max(0, innerW - curW));
-				return `  │  ${content}${pad}│`;
-			};
-
-			lines.push(padRow(row1));
-			if (row2) lines.push(padRow(row2));
-
-			// Middle Divider
-			const midBorder = `  ├─ ${theme.fg("accent", "⚡ 技能")} ${theme.fg("dim", `(${this.skills.length})`)} ──┬─ ${theme.fg("accent", "💬 快捷模版")} ${theme.fg("dim", `(${this.prompts.length})`)} ${"─".repeat(Math.max(2, cardWidth - 36))}┤`;
-			lines.push(midBorder);
-
-			const skillStr = this.skills.map((s) => theme.fg("dim", `• ${s}`)).join("  ") || theme.fg("dim", "无");
-			const promptStr = this.prompts.map((p) => theme.fg("dim", `• ${p}`)).join("  ");
-
-			lines.push(padRow(`${skillStr}   │  ${promptStr}`));
-
-			const bottomBorder = `  └${"─".repeat(cardWidth)}┘`;
-			lines.push(bottomBorder);
+		// 扩展组件列表（最多 2 行）
+		const pkgItems = this.packages.map((p) => theme.fg("dim", `• ${p}`));
+		const pkgRows = packItems(pkgItems, innerWidth, 2, theme);
+		for (const r of pkgRows) {
+			lines.push(padRow(r));
 		}
 
+		// 分割线
+		lines.push(`  ├${theme.fg("dim", "─".repeat(innerWidth + 4))}┤`);
+
+		// 技能与指令列表（各 1 行）
+		const skillItems = this.skills.map((s) => theme.fg("dim", `• ${s}`));
+		const skillRow = packItems(skillItems, innerWidth - 4, 1, theme)[0];
+		lines.push(padRow(`${theme.fg("accent", "⚡")}  ${skillRow}`));
+
+		const promptItems = this.prompts.map((p) => theme.fg("dim", `• ${p}`));
+		const promptRow = packItems(promptItems, innerWidth - 4, 1, theme)[0];
+		lines.push(padRow(`${theme.fg("accent", "💬")}  ${promptRow}`));
+
+		// 底边框
+		lines.push(`  └${theme.fg("dim", "─".repeat(innerWidth + 4))}┘`);
 		lines.push("");
+
 		return lines.map((l) => truncateToWidth(l, width));
 	}
 }

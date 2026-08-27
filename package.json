@@ -1,6 +1,6 @@
 {
   "name": "@audsiui/pi-statusbar",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "终端极简美学全套套件 —— 极客仪表盘 Header + 模型边框输入框 + 极致单行状态栏",
   "keywords": [
     "pi-package",
@@ -9,6 +9,7 @@
   ],
   "author": "audsiui",
   "license": "MIT",
+  "type": "module",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/audsiui/pi-statusbar.git"

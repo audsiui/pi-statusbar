@@ -25,12 +25,21 @@ export class SingleLineStatusbar implements Component {
 	private cachedTotals: UsageTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
 	private unsubBranch: () => void;
 
+	private ctx: ExtensionContext;
+	public tui: TUI;
+	private theme: Theme;
+	private footerData: any;
+
 	constructor(
-		private ctx: ExtensionContext,
-		public tui: TUI,
-		private theme: Theme,
-		private footerData: any,
+		ctx: ExtensionContext,
+		tui: TUI,
+		theme: Theme,
+		footerData: any,
 	) {
+		this.ctx = ctx;
+		this.tui = tui;
+		this.theme = theme;
+		this.footerData = footerData;
 		this.unsubBranch = this.footerData.onBranchChange(() => {
 			this.tui.requestRender();
 			void this.refreshGit();
