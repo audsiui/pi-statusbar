@@ -25,25 +25,27 @@
 
 import { execFile } from "node:child_process";
 import { isAbsolute, relative, resolve, sep } from "node:path";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { Component, Theme, TUI } from "@earendil-works/pi-tui";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
-/** 进度条格子数（1 格 = 10%） */
-const BAR_CELLS = 10;
+/** 进度条格子数（8 格精巧且比例适中） */
+const BAR_CELLS = 8;
 
 /** 上下文占用行动阈值：≥50% 黄（开始清理/压缩），≥80% 红（准备开新会话） */
 const CONTEXT_WARN_PCT = 50;
 const CONTEXT_DANGER_PCT = 80;
 
-/** git 状态刷新间隔（毫秒） */
-const GIT_STATUS_INTERVAL_MS = 10_000;
+/** Git 状态兜底轮询间隔（毫秒） */
+const GIT_POLL_INTERVAL_MS = 15_000;
 
-interface Totals {
+interface UsageTotals {
 	input: number;
 	output: number;
 	cacheRead: number;
 	cacheWrite: number;
 	cost: number;
+	latestCacheHitRate?: number;
 }
 
 /** 数字缩写，与内置 footer 口径一致：<1k 原样，<10k 一位小数 k，<1M 整数 k，<10M 一位小数 M，否则整数 M */
@@ -109,231 +111,302 @@ function parseGitStatus(out: string): { staged: number; modified: number } {
 }
 
 
+class StatusbarComponent implements Component {
+	private disposed = false;
+	private gitTimer: ReturnType<typeof setInterval>;
+	private gitStatus: { staged: number; modified: number } | undefined;
+	private gitInFlight = false;
+	private gitPending = false;
+	private totalsDirty = true;
+	private cachedTotals: UsageTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+	private unsubBranch: () => void;
+
+	constructor(
+		private ctx: ExtensionContext,
+		public tui: TUI,
+		private theme: Theme,
+		private footerData: any,
+	) {
+		this.unsubBranch = this.footerData.onBranchChange(() => {
+			this.tui.requestRender();
+			void this.refreshGit();
+		});
+
+		void this.refreshGit();
+		this.gitTimer = setInterval(() => void this.refreshGit(), GIT_POLL_INTERVAL_MS);
+	}
+
+	invalidate(): void {
+		this.totalsDirty = true;
+	}
+
+	dispose(): void {
+		this.disposed = true;
+		clearInterval(this.gitTimer);
+		this.unsubBranch();
+	}
+
+	/** 异步拉取 Git 状态，带并发锁与防抖合并 */
+	async refreshGit(): Promise<void> {
+		if (this.disposed) return;
+		if (this.footerData.getGitBranch() === null) {
+			this.gitStatus = undefined;
+			return;
+		}
+
+		if (this.gitInFlight) {
+			this.gitPending = true;
+			return;
+		}
+
+		this.gitInFlight = true;
+		try {
+			// -uno 忽略未跟踪文件扫描，大幅减少磁盘 I/O
+			const out = await runGit(this.ctx.sessionManager.getCwd(), ["status", "--porcelain", "-uno"]);
+			if (this.disposed) return;
+			this.gitStatus = parseGitStatus(out);
+			this.tui.requestRender();
+		} finally {
+			this.gitInFlight = false;
+			if (this.gitPending && !this.disposed) {
+				this.gitPending = false;
+				void this.refreshGit();
+			}
+		}
+	}
+
+	/** 缓存驱动的用量统计，避免每帧 O(N) 遍历 */
+	private getTotals(): UsageTotals {
+		if (!this.totalsDirty) {
+			return this.cachedTotals;
+		}
+
+		const totals: UsageTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+		let latestCacheHitRate: number | undefined;
+
+		for (const entry of this.ctx.sessionManager.getEntries()) {
+			if (entry.type !== "message") {
+				if (
+					(entry.type === "branch_summary" || entry.type === "compaction") &&
+					entry.usage
+				) {
+					const u = entry.usage;
+					totals.input += u.input ?? 0;
+					totals.output += u.output ?? 0;
+					totals.cacheRead += u.cacheRead ?? 0;
+					totals.cacheWrite += u.cacheWrite ?? 0;
+					totals.cost += u.cost?.total ?? 0;
+				}
+				continue;
+			}
+			if (entry.type === "message" && entry.message.role === "assistant") {
+				const u = entry.message.usage;
+				if (u) {
+					totals.input += u.input ?? 0;
+					totals.output += u.output ?? 0;
+					totals.cacheRead += u.cacheRead ?? 0;
+					totals.cacheWrite += u.cacheWrite ?? 0;
+					totals.cost += u.cost?.total ?? 0;
+					const promptTokens = (u.input ?? 0) + (u.cacheRead ?? 0) + (u.cacheWrite ?? 0);
+					if (promptTokens > 0) {
+						latestCacheHitRate = ((u.cacheRead ?? 0) / promptTokens) * 100;
+					}
+				}
+			} else if (
+				entry.type === "message" &&
+				entry.message.role === "toolResult" &&
+				entry.message.usage
+			) {
+				const u = entry.message.usage;
+				totals.input += u.input ?? 0;
+				totals.output += u.output ?? 0;
+				totals.cacheRead += u.cacheRead ?? 0;
+				totals.cacheWrite += u.cacheWrite ?? 0;
+				totals.cost += u.cost?.total ?? 0;
+			}
+		}
+
+		totals.latestCacheHitRate = latestCacheHitRate;
+		this.cachedTotals = totals;
+		this.totalsDirty = false;
+		return totals;
+	}
+
+	render(width: number): string[] {
+		const theme = this.theme;
+		const ctx = this.ctx;
+
+		// ---------- 第 2 行基础：工作目录 + 分支 + Git 变更 + 会话名 ----------
+		const home = process.env.HOME || process.env.USERPROFILE;
+		const cwd = formatCwdForFooter(ctx.sessionManager.getCwd(), home);
+		const branch = this.footerData.getGitBranch();
+		const sessionName = ctx.sessionManager.getSessionName();
+		let pwdLine = theme.fg("dim", cwd);
+		if (branch) {
+			pwdLine += ` ${theme.fg("accent", `⎇ ${branch}`)}`;
+			if (this.gitStatus && (this.gitStatus.staged > 0 || this.gitStatus.modified > 0)) {
+				const bits: string[] = [];
+				if (this.gitStatus.staged > 0) bits.push(theme.fg("success", `+${this.gitStatus.staged}`));
+				if (this.gitStatus.modified > 0) bits.push(theme.fg("warning", `~${this.gitStatus.modified}`));
+				pwdLine += ` ${bits.join(" ")}`;
+			}
+		}
+		if (sessionName) {
+			pwdLine += theme.fg("dim", ` • ${sessionName}`);
+		}
+
+		// ---------- 上下文占用：分段着色（仅填充格着色，轨道与总数保持暗调） ----------
+		const context = ctx.getContextUsage();
+		const contextWindow = context?.contextWindow ?? ctx.model?.contextWindow ?? 0;
+		let contextPart: string | undefined;
+		if (contextWindow > 0) {
+			const percent = context?.percent;
+			if (percent === null || percent === undefined) {
+				contextPart = theme.fg("dim", `?/${formatTokens(contextWindow)}`);
+			} else {
+				const filled = Math.min(BAR_CELLS, Math.round((percent / 100) * BAR_CELLS));
+				const empty = BAR_CELLS - filled;
+				const levelColor: "success" | "warning" | "error" =
+					percent >= CONTEXT_DANGER_PCT ? "error" : percent >= CONTEXT_WARN_PCT ? "warning" : "success";
+
+				const bar = theme.fg(levelColor, "▰".repeat(filled)) + theme.fg("dim", "▱".repeat(empty));
+				const pctStr = theme.fg(levelColor, `${percent.toFixed(1)}%`);
+				const totalStr = theme.fg("dim", `/${formatTokens(contextWindow)}`);
+				contextPart = `${bar} ${pctStr}${totalStr}`;
+			}
+		}
+
+		// ---------- 缓存驱动的会话用量（O(1) 读取） ----------
+		const totals = this.getTotals();
+
+		// ---------- 第 1 行左侧：核心指标组 ----------
+		const parts: string[] = [];
+		if (contextPart) parts.push(contextPart);
+		if (totals.input > 0 || totals.output > 0) {
+			parts.push(theme.fg("dim", `↑${formatTokens(totals.input)} ↓${formatTokens(totals.output)}`));
+		}
+		if (totals.cacheRead > 0 || totals.cacheWrite > 0) {
+			const cacheBits: string[] = [];
+			if (totals.cacheRead > 0) cacheBits.push(`⇣${formatTokens(totals.cacheRead)}`);
+			if (totals.cacheWrite > 0) cacheBits.push(`⇡${formatTokens(totals.cacheWrite)}`);
+			if (totals.latestCacheHitRate !== undefined) {
+				cacheBits.push(`⚡${totals.latestCacheHitRate.toFixed(1)}%`);
+			}
+			if (cacheBits.length > 0) parts.push(theme.fg("dim", cacheBits.join(" ")));
+		}
+		if (totals.cost > 0) {
+			parts.push(theme.fg("dim", `$${totals.cost.toFixed(3)}`));
+		} else if (ctx.model?.provider === "kimi-coding") {
+			parts.push(theme.fg("dim", "∞"));
+		}
+
+		// ---------- 第 1 行右侧：模型身份与状态（● 运行 / ○ 待命） ----------
+		const isRunning = !ctx.isIdle();
+		const modelGlyph = isRunning ? "●" : "○";
+		const modelId = ctx.model?.id ?? "no-model";
+		let right = theme.fg("accent", theme.bold(`${modelGlyph} ${modelId}`));
+
+		if (ctx.model?.reasoning && ctx.thinkingLevel && ctx.thinkingLevel !== "off") {
+			const level = ctx.thinkingLevel;
+			const thinkingColor =
+				level === "minimal"
+					? "thinkingMinimal"
+					: level === "low"
+						? "thinkingLow"
+						: level === "medium"
+							? "thinkingMedium"
+							: level === "high"
+								? "thinkingHigh"
+								: level === "xhigh"
+									? "thinkingXhigh"
+									: "thinkingMax";
+			right += theme.fg(thinkingColor, ` • ${level}`);
+		}
+		const provider = ctx.model?.provider;
+		if (provider && this.footerData.getAvailableProviderCount() > 1) {
+			right = theme.fg("dim", `(${provider}) `) + right;
+		}
+
+		const rightWidth = visibleWidth(right);
+		const separator = theme.fg("dim", " · ");
+
+		// 响应式降级：从末尾逐段丢弃辅助数据，确保核心上下文占用保留
+		let left = "";
+		while (parts.length > 0) {
+			const candidate = parts.join(separator);
+			if (visibleWidth(candidate) + rightWidth + 2 <= width) {
+				left = candidate;
+				break;
+			}
+			parts.pop();
+		}
+
+		// 第 1 行布局：稳定右对齐，绝不突变跳跃到最左侧
+		let line1: string;
+		const leftWidth = visibleWidth(left);
+		if (leftWidth + rightWidth + 1 <= width) {
+			const gap = " ".repeat(Math.max(1, width - leftWidth - rightWidth));
+			line1 = left === "" ? " ".repeat(width - rightWidth) + right : left + gap + right;
+		} else if (rightWidth <= width) {
+			line1 = " ".repeat(width - rightWidth) + right;
+		} else {
+			line1 = truncateToWidth(right, width, "…");
+		}
+
+		// 第 2 行：位置 + 扩展状态合并
+		const extensionStatuses = this.footerData.getExtensionStatuses();
+		if (extensionStatuses.size > 0) {
+			const statusLine = Array.from(extensionStatuses.entries())
+				.sort(([a], [b]) => a.localeCompare(b))
+				.map(([, text]) => sanitizeStatusText(text))
+				.join(" ");
+			pwdLine += theme.fg("dim", ` · ${statusLine}`);
+		}
+		const line2 = truncateToWidth(pwdLine, width, theme.fg("dim", "…"));
+
+		return [line1, line2];
+	}
+}
+
 export default function (pi: ExtensionAPI) {
-	let running = false;
-	let requestRender: (() => void) | undefined;
+	let statusbar: StatusbarComponent | undefined;
 
-	const rerender = (): void => requestRender?.();
+	const invalidate = () => statusbar?.invalidate();
+	const refreshGit = () => void statusbar?.refreshGit();
+	const rerender = () => statusbar?.tui.requestRender();
 
-	pi.on("agent_start", () => {
-		running = true;
-		rerender();
-	});
+	// 监听生命周期与交互事件，实现毫秒级响应
+	pi.on("agent_start", () => rerender());
 	pi.on("agent_end", () => {
-		running = false;
+		invalidate();
+		refreshGit();
 		rerender();
 	});
 	pi.on("agent_settled", () => {
-		running = false;
+		invalidate();
+		rerender();
+	});
+	pi.on("turn_end", () => {
+		invalidate();
+		refreshGit();
+		rerender();
+	});
+	pi.on("message_end", () => {
+		invalidate();
 		rerender();
 	});
 	pi.on("model_select", () => rerender());
+	pi.on("thinking_level_select", () => rerender());
+	pi.on("session_info_changed", () => rerender());
+	pi.on("session_compact", () => {
+		invalidate();
+		rerender();
+	});
 
 	pi.on("session_start", (_event, ctx) => {
 		ctx.ui.setFooter((tui, theme, footerData) => {
-			requestRender = () => tui.requestRender();
-
-			// ---------- git 变更状态：异步拉取 + 缓存，渲染永不走磁盘 ----------
-			let gitStatus: { staged: number; modified: number } | undefined;
-			let disposed = false;
-			const refreshGitStatus = async (): Promise<void> => {
-				if (disposed) return;
-				if (footerData.getGitBranch() === null) {
-					// 不在 git 仓库：无状态可显示
-					gitStatus = undefined;
-					return;
-				}
-				const out = await runGit(ctx.sessionManager.getCwd(), ["status", "--porcelain"]);
-				if (disposed) return;
-				gitStatus = parseGitStatus(out);
-				requestRender?.();
-			};
-			void refreshGitStatus();
-			const gitRefreshTimer = setInterval(() => void refreshGitStatus(), GIT_STATUS_INTERVAL_MS);
-			const unsubBranch = footerData.onBranchChange(() => {
-				tui.requestRender();
-				void refreshGitStatus();
-			});
-
-			return {
-				dispose: () => {
-					disposed = true;
-					clearInterval(gitRefreshTimer);
-					unsubBranch();
-				},
-				invalidate() {},
-				render(width: number): string[] {
-					// ---------- 第 2 行：工作目录 + 分支（accent）+ git 变更 + 会话名 + 扩展状态 ----------
-					const home = process.env.HOME || process.env.USERPROFILE;
-					const cwd = formatCwdForFooter(ctx.sessionManager.getCwd(), home);
-					const branch = footerData.getGitBranch();
-					const sessionName = ctx.sessionManager.getSessionName();
-					let pwdLine = theme.fg("dim", cwd);
-					if (branch) {
-						pwdLine += ` ${theme.fg("accent", `⎇ ${branch}`)}`;
-						// 变更状态：+暂存(绿) ~已修改(黄)，无变更或不在仓库时不显示
-						if (gitStatus && (gitStatus.staged > 0 || gitStatus.modified > 0)) {
-							const bits: string[] = [];
-							if (gitStatus.staged > 0) bits.push(theme.fg("success", `+${gitStatus.staged}`));
-							if (gitStatus.modified > 0) bits.push(theme.fg("warning", `~${gitStatus.modified}`));
-							pwdLine += ` ${bits.join(" ")}`;
-						}
-					}
-					if (sessionName) {
-						pwdLine += theme.fg("dim", ` • ${sessionName}`);
-					}
-
-					// ---------- 上下文占用：唯一带渐变仪表色的数据（行动阈值） ----------
-					const context = ctx.getContextUsage();
-					const contextWindow = context?.contextWindow ?? ctx.model?.contextWindow ?? 0;
-					let contextPart: string | undefined;
-					if (contextWindow > 0) {
-						const percent = context?.percent;
-						if (percent === null || percent === undefined) {
-							// 压缩后 token 数未知，等待下一次 LLM 响应
-							contextPart = theme.fg("dim", `?/${formatTokens(contextWindow)}`);
-						} else {
-							const filled = Math.min(BAR_CELLS, Math.ceil((percent / 100) * BAR_CELLS));
-							const bar = "▰".repeat(filled) + "▱".repeat(BAR_CELLS - filled);
-							// 渐变仪表色：<50% 绿 / ≥50% 黄（行动）/ ≥80% 红（紧急）
-							const color: "success" | "warning" | "error" =
-								percent >= CONTEXT_DANGER_PCT ? "error" : percent >= CONTEXT_WARN_PCT ? "warning" : "success";
-							contextPart = theme.fg(
-								color,
-								`${bar} ${percent.toFixed(1)}%/${formatTokens(contextWindow)}`,
-							);
-						}
-					}
-
-					// ---------- 会话累计用量（与内置 footer 口径一致：assistant + toolResult + 压缩摘要） ----------
-					const totals: Totals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
-					let latestCacheHitRate: number | undefined;
-					for (const entry of ctx.sessionManager.getEntries()) {
-						if (entry.type !== "message") {
-							if (
-								(entry.type === "branch_summary" || entry.type === "compaction") &&
-								entry.usage
-							) {
-								const u = entry.usage;
-								totals.input += u.input ?? 0;
-								totals.output += u.output ?? 0;
-								totals.cacheRead += u.cacheRead ?? 0;
-								totals.cacheWrite += u.cacheWrite ?? 0;
-								totals.cost += u.cost?.total ?? 0;
-							}
-							continue;
-						}
-						if (entry.type === "message" && entry.message.role === "assistant") {
-							const u = entry.message.usage;
-							if (u) {
-								totals.input += u.input ?? 0;
-								totals.output += u.output ?? 0;
-								totals.cacheRead += u.cacheRead ?? 0;
-								totals.cacheWrite += u.cacheWrite ?? 0;
-								totals.cost += u.cost?.total ?? 0;
-								const promptTokens = (u.input ?? 0) + (u.cacheRead ?? 0) + (u.cacheWrite ?? 0);
-								if (promptTokens > 0) {
-									latestCacheHitRate = ((u.cacheRead ?? 0) / promptTokens) * 100;
-								}
-							}
-						} else if (
-							entry.type === "message" &&
-							entry.message.role === "toolResult" &&
-							entry.message.usage
-						) {
-							const u = entry.message.usage;
-							totals.input += u.input ?? 0;
-							totals.output += u.output ?? 0;
-							totals.cacheRead += u.cacheRead ?? 0;
-							totals.cacheWrite += u.cacheWrite ?? 0;
-							totals.cost += u.cost?.total ?? 0;
-						}
-					}
-
-					// ---------- 第 2 行左侧：会话数据，全部 dim ----------
-					const parts: string[] = [];
-					if (contextPart) parts.push(contextPart);
-					if (totals.input > 0) {
-						parts.push(theme.fg("dim", `↑${formatTokens(totals.input)} ↓${formatTokens(totals.output)}`));
-					}
-					if (totals.cacheRead > 0 || totals.cacheWrite > 0) {
-						// 图标化：⇣读 ⇡写 ⚡命中率（快/省钱的直觉符号）
-						const cacheBits: string[] = [];
-						if (totals.cacheRead > 0) cacheBits.push(`⇣${formatTokens(totals.cacheRead)}`);
-						if (totals.cacheWrite > 0) cacheBits.push(`⇡${formatTokens(totals.cacheWrite)}`);
-						if (latestCacheHitRate !== undefined) {
-							cacheBits.push(`⚡${latestCacheHitRate.toFixed(1)}%`);
-						}
-						if (cacheBits.length > 0) parts.push(theme.fg("dim", cacheBits.join(" ")));
-					}
-					if (totals.cost > 0) {
-						parts.push(theme.fg("dim", `$${totals.cost.toFixed(3)}`));
-					} else if (ctx.model?.provider === "kimi-coding") {
-						parts.push(theme.fg("dim", "∞")); // 订阅制：不限量
-					}
-
-					// ---------- 第 1 行右侧：模型身份，accent 加粗；● 工作中 / ○ 待命 ----------
-					const modelId = ctx.model?.id ?? "no-model";
-					const modelGlyph = running ? "●" : "○";
-					let right = theme.fg("accent", theme.bold(`${modelGlyph} ${modelId}`));
-					// 思考级别 = 智能程度色阶（官方 thinking* 主题色：灰→蓝→紫→品红递增）
-					if (ctx.model?.reasoning && ctx.thinkingLevel) {
-						const level = ctx.thinkingLevel;
-						const thinkingColor =
-							level === "minimal"
-								? "thinkingMinimal"
-								: level === "low"
-									? "thinkingLow"
-									: level === "medium"
-										? "thinkingMedium"
-										: level === "high"
-											? "thinkingHigh"
-											: level === "xhigh"
-												? "thinkingXhigh"
-												: "thinkingMax";
-						right += theme.fg(thinkingColor, ` • ${level}`);
-					}
-					const provider = ctx.model?.provider;
-					if (provider && footerData.getAvailableProviderCount() > 1) {
-						right = theme.fg("dim", `(${provider}) `) + right;
-					}
-
-					const rightWidth = visibleWidth(right);
-					const separator = theme.fg("dim", " · ");
-
-					// 窄屏降级：从尾部（价值最低）逐段丢弃，直到左段放得下
-					let left = "";
-					while (parts.length > 0) {
-						const candidate = parts.join(separator);
-						if (visibleWidth(candidate) + rightWidth + 2 <= width) {
-							left = candidate;
-							break;
-						}
-						parts.pop();
-					}
-
-					// 极窄：左段全丢后右侧仍超宽，截断右侧
-					let line1: string;
-					if (visibleWidth(right) > width) {
-						line1 = truncateToWidth(right, width, "…");
-					} else {
-						const gap = " ".repeat(Math.max(1, width - visibleWidth(left) - rightWidth));
-						line1 = left === "" ? right : left + gap + right;
-					}
-
-					// 第 2 行：位置信息 + 扩展状态（ctx.ui.setStatus 设置的内容）合并，整体截断
-					const extensionStatuses = footerData.getExtensionStatuses();
-					if (extensionStatuses.size > 0) {
-						const statusLine = Array.from(extensionStatuses.entries())
-							.sort(([a], [b]) => a.localeCompare(b))
-							.map(([, text]) => sanitizeStatusText(text))
-							.join(" ");
-						pwdLine += theme.fg("dim", ` · ${statusLine}`);
-					}
-					const pwdLineFinal = truncateToWidth(pwdLine, width, theme.fg("dim", "…"));
-					return [line1, pwdLineFinal];
-				},
-			};
+			statusbar = new StatusbarComponent(ctx, tui, theme, footerData);
+			return statusbar;
 		});
 	});
 }

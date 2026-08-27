@@ -1,15 +1,38 @@
 {
-  "name": "pi-statusbar",
-  "version": "1.0.0",
-  "description": "中文状态栏扩展 —— 替换内置 footer：会话用量/缓存/成本/上下文占用 + 模型身份",
-  "keywords": ["pi-package", "extension", "statusbar"],
+  "name": "@audsiui/pi-statusbar",
+  "version": "1.2.0",
+  "description": "优雅高效的状态栏扩展 —— 替换内置 footer：会话用量/缓存/成本/上下文占用 + 模型身份",
+  "keywords": [
+    "pi-package",
+    "extension",
+    "statusbar"
+  ],
+  "author": "audsiui",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/audsiui/pi-statusbar.git"
+  },
+  "bugs": {
+    "url": "https://github.com/audsiui/pi-statusbar/issues"
+  },
+  "homepage": "https://github.com/audsiui/pi-statusbar#readme",
+  "files": [
+    "extensions",
+    "README.md"
+  ],
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*"
   },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
   "pi": {
-    "extensions": ["./extensions"]
+    "extensions": [
+      "./extensions"
+    ]
   }
 }

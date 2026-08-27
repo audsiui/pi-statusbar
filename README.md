@@ -14,20 +14,32 @@
 
 ## 安装
 
+### 方式 1：通过 npm 安装（推荐）
+
 ```bash
-pi install git:github.com/audsiui/pi-statusbar@v1.1.0
+pi install npm:@audsiui/pi-statusbar
 ```
 
-想临时试用（仅当前运行，不写入 settings）：
+### 方式 2：通过 GitHub 安装
 
 ```bash
-pi -e git:github.com/audsiui/pi-statusbar
+pi install git:github.com/audsiui/pi-statusbar@v1.2.0
+```
+
+临时试用（仅当前会话有效，不写入全局 settings）：
+
+```bash
+# npm 试用
+pi -e npm:@audsiui/pi-statusbar
+
+# 本地目录试用
+pi -e /path/to/pi-statusbar
 ```
 
 ## 卸载
 
 ```bash
-pi remove git:github.com/audsiui/pi-statusbar
+pi remove @audsiui/pi-statusbar
 ```
 
 ## 说明
