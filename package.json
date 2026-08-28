@@ -1,6 +1,6 @@
 {
   "name": "@audsiui/pi-statusbar",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "description": "Minimalist terminal aesthetic suite for Pi — clean startup header, model-border editor, and single-line statusbar",
   "keywords": [
     "pi-package",

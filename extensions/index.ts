@@ -83,6 +83,7 @@ export default function (pi: ExtensionAPI) {
 	});
 	pi.on("tool_execution_start", (event) => {
 		currentToolName = event.toolName;
+		startSpinner();
 		rerender();
 	});
 	pi.on("tool_execution_end", () => {
@@ -110,7 +111,7 @@ export default function (pi: ExtensionAPI) {
 		ctx.ui.setHeader((tui, theme) => {
 			activeTui = tui;
 			beautifyLoadedResources(tui, theme);
-			installUniversalToolHook(tui, theme);
+			installUniversalToolHook(tui, theme, getSpinnerFrame);
 			return new DashboardHeader(ctx, tui, theme);
 		});
 
