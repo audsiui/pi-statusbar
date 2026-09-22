@@ -1,9 +1,37 @@
-import type { Theme, TUI } from "@earendil-works/pi-tui";
+import { keyText, type Theme } from "@earendil-works/pi-coding-agent";
+import type { TUI } from "@earendil-works/pi-tui";
 import { stripTerminalSequences, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+
+type ToolState = "running" | "success" | "error";
+type ToolBandBg = "toolPendingBg" | "toolSuccessBg" | "toolErrorBg";
+
+/**
+ * 与 Pi 原生 ToolExecutionComponent 完全一致的语义底色：
+ * 运行中 / 成功 / 失败 各自一块通栏色带，折叠态因此不再是“裸奔的一行文字”。
+ */
+const STATE_BAND_BG: Record<ToolState, ToolBandBg> = {
+	running: "toolPendingBg",
+	success: "toolSuccessBg",
+	error: "toolErrorBg",
+};
+
+const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/** 工具名之前可能出现的装饰性符号（● ▸ ▶ • ┃ 等），先剥掉再匹配工具名 */
+const LEADING_DECOR = /^[\s•●○◉◎◆◇▸▹►▶➤›»·—–:|]*/;
+
+/** 展开快捷键提示，跟随用户自定义 keybindings */
+function expandKeyHint(): string {
+	try {
+		return keyText("app.tools.expand");
+	} catch {
+		return "ctrl+o";
+	}
+}
 
 /** 剥离工具名或命令行前缀（如 "todo + task" -> "+ task"，"read /path" -> "/path"，"$ cmd" -> "cmd"） */
 function stripToolPrefix(text: string, toolName: string): string {
-	const trimmed = text.trim();
+	const trimmed = text.trim().replace(LEADING_DECOR, "");
 	const escaped = toolName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 	const pattern = new RegExp(`^(?:\\[?${escaped}\\]?|\\$)\\s*[:\\-—]?\\s*`, "i");
 	return trimmed.replace(pattern, "").trim();
@@ -95,58 +123,157 @@ export function extractTarget(argsOrToolName: any, maybeArgs?: any): string {
 	return "";
 }
 
-const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+/** 取工具输出里的全部文本（edit 类工具在调用方切换为 diff 基准） */
+function collectTextOutput(comp: any): string {
+	let rawText = "";
+	for (const c of comp.result?.content ?? []) {
+		if (c?.type === "text" && typeof c.text === "string") {
+			rawText += (rawText ? "\n" : "") + c.text;
+		}
+	}
+	return rawText;
+}
 
-/** 格式化视觉辨识度极高的单行 ToolCall 顶行 */
+/** diff 统计：edit/write 显示 "+12 -3" 远比 "1,024 chars" 有信息量 */
+function formatDiffStat(diff: string): string {
+	let added = 0;
+	let removed = 0;
+	for (const line of diff.split("\n")) {
+		if (line.startsWith("+++") || line.startsWith("---")) continue;
+		if (line.startsWith("+")) added++;
+		else if (line.startsWith("-")) removed++;
+	}
+	if (added === 0 && removed === 0) return "";
+	return `+${added} -${removed}`;
+}
+
+/** 从错误输出里挑一行最有信息量的摘要（优先末尾的 status 行，如 "Command exited with code 1"） */
+function extractErrorReason(text: string): string {
+	const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+	if (lines.length === 0) return "";
+	const isStatusLine = (l: string) =>
+		l.length <= 80 &&
+		/(exit(ed)? with code|exited with|error|failed|failure|aborted|timed? out|denied|not found|no such file|cannot|unable|refused|✖|⚠)/i.test(l);
+	for (let i = lines.length - 1; i >= 0 && i >= lines.length - 5; i--) {
+		if (isStatusLine(lines[i])) return lines[i];
+	}
+	return lines[0];
+}
+
+/**
+ * 把一行补齐到整行宽度并染上语义底色（复刻原生 Box 的 toolPendingBg/Success/Error 观感）。
+ * 注意：truncateToWidth 截断时会在末尾补一个 \x1b[0m 全重置，会把后面的内容连底色一起清掉，
+ * 因此这里在每个全重置之后把底色补回去，保证色带连续不断裂。
+ */
+function bandLine(theme: Theme, line: string, width: number, state: ToolState): string {
+	const bg = STATE_BAND_BG[state];
+	if (width < 4) return truncateToWidth(line, Math.max(0, width), "…");
+
+	const fitted = truncateToWidth(line, width, "", true);
+	const bgAnsi = (theme as any).getBgAnsi?.(bg) as string | undefined;
+	const patched = bgAnsi ? fitted.replace(/\x1b\[0m/g, `\x1b[0m${bgAnsi}`) : fitted;
+	return theme.bg(bg, patched);
+}
+
+/**
+ * 组装右侧元信息，空间不足时按“展开提示 → 耗时 → 主体”的顺序优雅降级，
+ * 避免出现 "53 …" 这种被硬切碎的残句。
+ */
+function buildRightSide(theme: Theme, parts: string[], hint: string, budget: number): string {
+	// 连一段有意义的信息都放不下时，整个右侧让位给目标参数
+	if (budget < 6) return "";
+	if (parts.length === 0 && hint.trim() === "") return "";
+	const styled = (text: string) => theme.fg("dim", text);
+
+	const full = parts.length > 0 ? `${parts.join(" · ")}${hint}` : hint.trim();
+	if (visibleWidth(full) <= budget) return styled(full);
+
+	const withoutHint = parts.join(" · ");
+	if (visibleWidth(withoutHint) <= budget) return styled(withoutHint);
+
+	// 先丢掉末尾的耗时，再丢更次要的段
+	if (parts.length > 1) {
+		const shorter = parts.slice(0, -1).join(" · ");
+		if (visibleWidth(shorter) <= budget) return styled(shorter);
+	}
+
+	const primary = parts[0] ?? "";
+	return primary ? styled(truncateToWidth(primary, budget, "…")) : "";
+}
+
+/** 格式化单行 ToolCall 顶行：状态 gutter + 状态符号 + 工具名 + 目标（左），元信息右对齐锚定 */
 function formatToolHeader(
 	theme: Theme,
-	badge: string,
+	toolName: string,
 	target: string,
-	meta: string,
-	state: "running" | "success" | "error",
+	metaParts: string[],
+	state: ToolState,
 	expanded: boolean,
 	width: number,
+	hasHiddenContent: boolean,
 	getSpinnerFrame?: () => string,
 ): string {
-	const gutter =
-		state === "running"
-			? theme.fg("warning", "▎")
-			: state === "error"
-				? theme.fg("error", "▎")
-				: theme.fg("success", "▎");
+	const gutterColor = state === "running" ? "warning" : state === "error" ? "error" : "success";
+	const gutter = theme.fg(gutterColor, "▎");
 
 	const spinner = getSpinnerFrame
 		? getSpinnerFrame()
 		: SPINNER_FRAMES[Math.floor(Date.now() / 80) % SPINNER_FRAMES.length];
 
-	const arrow =
+	const glyph =
 		state === "error"
 			? theme.fg("error", "✖")
 			: state === "running"
 				? theme.fg("warning", spinner)
-				: expanded
-					? theme.fg("accent", "▼")
-					: theme.fg("dim", "▶");
+				: theme.fg("success", "✓");
 
-	const toolPill = `${theme.fg("dim", "[")}${theme.bold(theme.fg("accent", badge))}${theme.fg("dim", "]")}`;
-	const metaStr = meta ? ` ${theme.fg("dim", `· ${meta}`)}` : "";
+	const toolLabel = theme.bold(theme.fg("accent", toolName));
+	const prefix = ` ${gutter} ${glyph} ${toolLabel} `;
+	const prefixWidth = visibleWidth(prefix);
 
-	let line = `  ${gutter} ${arrow} ${toolPill} ${target}${metaStr}`;
-	if (visibleWidth(line) > width) {
-		// 优先裁剪 target，保证前缀与后缀元数据完整
-		const fixedLen = visibleWidth(`  ${gutter} ${arrow} ${toolPill} `) + visibleWidth(metaStr);
-		const maxTargetWidth = Math.max(10, width - fixedLen - 2);
-		const shortTarget = truncateToWidth(target, maxTargetWidth, "…");
-		line = `  ${gutter} ${arrow} ${toolPill} ${shortTarget}${metaStr}`;
+	// 折叠且仍有隐藏内容时，附上展开键提示
+	const hint = !expanded && hasHiddenContent ? `  ${expandKeyHint()}` : "";
+
+	const minTarget = 8;
+	const gap = 2;
+	const available = width - prefixWidth - gap;
+
+	// 终端极窄：保留工具名与目标，丢弃元信息
+	if (available < minTarget) {
+		return bandLine(theme, `${prefix}${target}`, width, state);
 	}
-	return truncateToWidth(line, width);
+
+	const right = buildRightSide(theme, metaParts, hint, available - minTarget);
+	const targetText = truncateToWidth(target, Math.max(minTarget, available - visibleWidth(right)), "…");
+
+	const left = `${prefix}${targetText}`;
+	const padding = Math.max(gap, width - visibleWidth(left) - visibleWidth(right));
+	return bandLine(theme, `${left}${" ".repeat(padding)}${right}`, width, state);
 }
 
-/** 格式化展开后的多行输出，左侧附带连贯细竖线，绝不与聊天正文混淆 */
-function formatExpandedBody(theme: Theme, content: string, width: number): string[] {
-	const gutter = theme.fg("dim", "│");
-	const lines = content.split("\n");
-	return lines.map((l) => truncateToWidth(`  ${gutter}   ${l}`, width));
+/** 格式化展开后的多行输出，左侧附带连贯细竖线，整体沿用同一条语义色带 */
+function formatExpandedBody(theme: Theme, content: string, width: number, state: ToolState): string[] {
+	const rail = theme.fg("dim", "│");
+	return content.split("\n").map((line) => bandLine(theme, `  ${rail}   ${line}`, width, state));
+}
+
+/** 优先复用工具原生 callRendererComponent 的首行（自动兼容各工具的格式化），否则走通用参数提取 */
+function extractCallTarget(comp: any, toolName: string, width: number): string {
+	if (comp.callRendererComponent && typeof comp.callRendererComponent.render === "function") {
+		try {
+			const rendered = comp.callRendererComponent.render(width);
+			if (Array.isArray(rendered) && rendered.length > 0) {
+				const firstLine = stripTerminalSequences(rendered[0] || "").trim();
+				const stripped = stripToolPrefix(firstLine, toolName);
+				if (stripped) {
+					return stripped;
+				}
+			}
+		} catch {
+			// 忽略异常，降级到通用参数提取
+		}
+	}
+	return extractTarget(comp.args);
 }
 
 /** 为单个 ToolExecutionComponent 挂载单行响应式拦截器 */
@@ -166,59 +293,76 @@ function hookToolComponent(comp: any, theme: Theme, getSpinnerFrame?: () => stri
 		}
 
 		const isError = Boolean(comp.result?.isError);
-		const state: "running" | "success" | "error" = isRunning ? "running" : isError ? "error" : "success";
+		const state: ToolState = isRunning ? "running" : isError ? "error" : "success";
 
-		// 1. 优先尝试从组件原生的 callRendererComponent 中提取（自动复用工具自带的 renderCall 格式化）
-		let target = "";
-		if (comp.callRendererComponent && typeof comp.callRendererComponent.render === "function") {
-			try {
-				const rendered = comp.callRendererComponent.render(width);
-				if (Array.isArray(rendered) && rendered.length > 0) {
-					const firstLine = stripTerminalSequences(rendered[0] || "").trim();
-					const stripped = stripToolPrefix(firstLine, toolName);
-					if (stripped) {
-						target = stripped;
-					}
-				}
-			} catch {
-				// 忽略异常，降级到通用参数提取
-			}
-		}
+		// 1. 目标参数（工具名 + 核心入参）
+		let target = extractCallTarget(comp, toolName, width);
 
-		// 2. 若无原生 callRenderer 或提取为空，使用纯通用参数提取器（无任何工具名硬编码）
-		if (!target) {
-			target = extractTarget(comp.args);
-		}
-
-		// 提取输出内容与字符统计
-		let rawText = "";
-		for (const c of comp.result?.content ?? []) {
-			if (c?.type === "text" && typeof c.text === "string") {
-				rawText += (rawText ? "\n" : "") + c.text;
-			}
-		}
-
-		// Edit 工具若有 diff 则以 diff 为文本基准
-		const diff = comp.result?.details?.diff;
-		if (diff && typeof diff === "string") {
+		// 2. 输出内容与字符统计；edit 类工具若有 diff 则以 diff 为文本基准
+		let rawText = collectTextOutput(comp);
+		const diff = typeof comp.result?.details?.diff === "string" ? comp.result.details.diff : "";
+		if (diff) {
 			rawText = diff;
 		}
 
-		// 元数据构建：纯净的 字符数 + 耗时
-		const elapsedStr = elapsedMs !== undefined ? ` · ${(elapsedMs / 1000).toFixed(1)}s` : "";
-		const chars = rawText.length;
-		const meta = isRunning ? "running..." : `${chars.toLocaleString()} chars${elapsedStr}`;
-
-		const expanded = Boolean(comp.expanded);
-		const header = formatToolHeader(theme, toolName, target, meta, state, expanded, width, getSpinnerFrame);
-
-		if (expanded && rawText) {
-			const bodyLines = formatExpandedBody(theme, rawText, width);
-			return [header, ...bodyLines];
+		// 3. 错误态在左侧补一条原因摘要，避免折叠时只剩一个红色的 ✖
+		if (state === "error") {
+			const reason = extractErrorReason(rawText);
+			if (reason) {
+				const shortReason = truncateToWidth(reason, 48, "…");
+				target = target ? `${target} · ${shortReason}` : shortReason;
+			}
 		}
 
-		// 默认状态下严格只返回 1 行！
-		return [header];
+		// 4. 元数据：diff 统计 / 字符数 + 耗时，右对齐
+		const metaParts: string[] = [];
+		if (isRunning) {
+			metaParts.push("running…");
+		} else {
+			const diffStat = diff ? formatDiffStat(diff) : "";
+			if (diffStat) {
+				// diff 统计比字符数有信息量，二者不重复展示
+				metaParts.push(diffStat);
+			} else if (rawText.length > 0) {
+				metaParts.push(`${rawText.length.toLocaleString("en-US")} chars`);
+			} else if ((comp.imageComponents?.length ?? 0) > 0) {
+				metaParts.push("image");
+			}
+			if (elapsedMs !== undefined) {
+				metaParts.push(`${(elapsedMs / 1000).toFixed(1)}s`);
+			}
+		}
+
+		const expanded = Boolean(comp.expanded);
+		const header = formatToolHeader(
+			theme,
+			toolName,
+			target,
+			metaParts,
+			state,
+			expanded,
+			width,
+			rawText.length > 0 || (comp.imageComponents?.length ?? 0) > 0,
+			getSpinnerFrame,
+		);
+
+		// 顶部补一个空行，复刻原生组件的 Spacer(1)，让色带不与上文糊在一起
+		const lines: string[] = ["", header];
+
+		if (expanded && rawText) {
+			lines.push(...formatExpandedBody(theme, rawText, width, state));
+		}
+
+		// 图片类结果不能丢：原样透传原生 Image 组件
+		try {
+			for (const img of comp.imageComponents ?? []) {
+				lines.push(...img.render(width));
+			}
+		} catch {
+			// 忽略图片渲染异常，保证至少有一行摘要
+		}
+
+		return lines;
 	};
 }
 

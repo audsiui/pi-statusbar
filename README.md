@@ -14,7 +14,7 @@ A [Pi](https://github.com/earendil-works/pi) extension that replaces the default
 - Right (anchored): context-usage bar (`▰▰▰▱▱▱ 48.2%/200k`), cost, cache read/write + hit rate, tokens in/out, extension statuses.
 - Drops auxiliary metrics from the left when the terminal is too narrow, so the context bar and key info never wrap.
 
-**Tool output** — replaces the multi-line box that Pi draws for every tool execution (`read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`, plus any third-party tool) with a single summary line: a colored gutter (`▎`) for state (running/success/error), the tool name, the target argument, and `chars · time`. Press `Ctrl+O` to expand; expanded bodies are wrapped with a thin side rail so they don't blend into chat text.
+**Tool output** — replaces the multi-line box that Pi draws for every tool execution (`read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`, plus any third-party tool) with a single full-width band: a colored gutter (`▎`) and state glyph (`✓` / `✖` / spinner) on the left, the tool name plus its target argument, and right-aligned metadata (`+12 -3 · 0.3s` for diffs, `7,166 chars · 0.1s` otherwise). The band reuses Pi's own semantic backgrounds (`toolPendingBg` / `toolSuccessBg` / `toolErrorBg`), so running / success / error stay readable at a glance, and a `ctrl+o` hint appears while there is hidden output. Press `Ctrl+O` to expand; expanded bodies are wrapped with a thin side rail so they don't blend into chat text.
 
 ## Screenshot
 
@@ -34,7 +34,10 @@ A [Pi](https://github.com/earendil-works/pi) extension that replaces the default
 ╰────────────────────────────────────────────────────────── [ ↵ Send ] ──╯
 ~/workspace/pi ⎇ main +2 ~5    $0.123 · ⚡85% · ↑12k ↓3k · ▰▰▰▱▱▱ 48.2%/200k
 
-▎ ▶ [read] header.ts · 7,166 chars · 0.1s
+▎ ✓ read  extensions/tools.ts              7,166 chars · 0.1s  ctrl+o
+▎ ⠋ bash  pnpm test                                    running…
+▎ ✖ bash  pnpm test · Command exited with code 1   103 chars · 2.4s
+▎ ✓ edit  extensions/editor.ts                +12 -3 · 0.3s  ctrl+o
 ```
 
 ## Install
@@ -76,6 +79,7 @@ extensions/
 - Only the context-usage bar and git counts carry semantic color; everything else is dim/muted.
 - Git status is polled in the background (`GIT_OPTIONAL_LOCKS=0`); token usage is cached. Neither blocks the input or render loop.
 - The tool hook covers tools Pi ships with plus any third-party tool that follows the same `toolName` / `render` / `addChild` contract.
+- The tool band reuses Pi's own `toolPendingBg` / `toolSuccessBg` / `toolErrorBg`, so the collapsed line keeps the semantic coloring of the native box while staying one row tall. Metadata degrades gracefully (hint → duration → body) instead of being sliced mid-word on narrow terminals.
 - Only uses Pi's public surface (`ExtensionAPI`, `sessionManager`, `theme`, `footerData`).
 
 ## License
