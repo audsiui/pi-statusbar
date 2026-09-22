@@ -6,12 +6,12 @@ export interface UsageTotals {
 	cacheRead: number;
 	cacheWrite: number;
 	cost: number;
-	latestCacheHitRate?: number;
+	/** 整会话缓存命中率：cacheRead / (input + cacheRead + cacheWrite)，无 prompt 流量时为 undefined */
+	cacheHitRate?: number;
 }
 
 export function calculateUsageTotals(sessionManager: ReadonlySessionManager): UsageTotals {
 	const totals: UsageTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
-	let latestCacheHitRate: number | undefined;
 
 	for (const entry of sessionManager.getEntries()) {
 		if (entry.type !== "message") {
@@ -36,10 +36,6 @@ export function calculateUsageTotals(sessionManager: ReadonlySessionManager): Us
 				totals.cacheRead += u.cacheRead ?? 0;
 				totals.cacheWrite += u.cacheWrite ?? 0;
 				totals.cost += u.cost?.total ?? 0;
-				const promptTokens = (u.input ?? 0) + (u.cacheRead ?? 0) + (u.cacheWrite ?? 0);
-				if (promptTokens > 0) {
-					latestCacheHitRate = ((u.cacheRead ?? 0) / promptTokens) * 100;
-				}
 			}
 		} else if (
 			entry.type === "message" &&
@@ -55,6 +51,11 @@ export function calculateUsageTotals(sessionManager: ReadonlySessionManager): Us
 		}
 	}
 
-	totals.latestCacheHitRate = latestCacheHitRate;
+	// 会话口径：整个会话的 cacheRead 占总 prompt token（input + cacheRead + cacheWrite）的比例。
+	// 天然覆盖 assistant / toolResult / compaction 等全部带 usage 的 entry，与 ⇣/⇡ 总额口径一致。
+	const promptTokens = totals.input + totals.cacheRead + totals.cacheWrite;
+	if (promptTokens > 0) {
+		totals.cacheHitRate = (totals.cacheRead / promptTokens) * 100;
+	}
 	return totals;
 }

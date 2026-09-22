@@ -161,8 +161,8 @@ export class SingleLineStatusbar implements Component {
 			const cacheBits: string[] = [];
 			if (totals.cacheRead > 0) cacheBits.push(`⇣${formatTokens(totals.cacheRead)}`);
 			if (totals.cacheWrite > 0) cacheBits.push(`⇡${formatTokens(totals.cacheWrite)}`);
-			if (totals.latestCacheHitRate !== undefined) {
-				cacheBits.push(`⚡${totals.latestCacheHitRate.toFixed(1)}%`);
+			if (totals.cacheHitRate !== undefined) {
+				cacheBits.push(`⚡${totals.cacheHitRate.toFixed(1)}%`);
 			}
 			if (cacheBits.length > 0) auxParts.push(theme.fg("dim", cacheBits.join(" ")));
 		}
