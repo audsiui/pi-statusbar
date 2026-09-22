@@ -1,8 +1,6 @@
-import { homedir } from "node:os";
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Component, Theme, TUI } from "@earendil-works/pi-tui";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { cleanPackageName, formatCwdForFooter } from "./utils/format.ts";
+import { cleanPackageName } from "./utils/format.ts";
 
 /** 将一组项目根据最大可用宽度自动流式排列，严格保证不超过 maxWidth，超出行数则附加溢出标签 */
 function packItems(
@@ -189,14 +187,16 @@ export function beautifyLoadedResources(tui: any, theme: Theme): void {
 	} catch {}
 }
 
-/** 极简 Header 组件：只负责显示顶部简洁优雅的 π 标识，不再冗余堆叠卡片 */
-export class DashboardHeader implements Component {
-	private ctx: ExtensionContext;
+/**
+ * 静音头部：Pi 内置启动头是 logo + 大段键位提示，这里整体替换为空渲染。
+ * 唯一保留的自定义是 loadedResourcesContainer 的资源卡片（初始打开 Pi 时的表格）；
+ * 正文区域的 toolcall / think 一律交还 Pi 原生渲染，不做任何拦截。
+ */
+export class SilentHeader implements Component {
 	public tui: TUI;
 	private theme: Theme;
 
-	constructor(ctx: ExtensionContext, tui: TUI, theme: Theme) {
-		this.ctx = ctx;
+	constructor(tui: TUI, theme: Theme) {
 		this.tui = tui;
 		this.theme = theme;
 		beautifyLoadedResources(tui, theme);
@@ -204,17 +204,9 @@ export class DashboardHeader implements Component {
 
 	invalidate(): void {}
 
-	render(width: number): string[] {
+	render(_width: number): string[] {
+		// 资源可能是异步加载的，容器就位前每次渲染重试一次（已美化后为无成本早退）
 		beautifyLoadedResources(this.tui, this.theme);
-		const theme = this.theme;
-		const home = homedir();
-		const cwdStr = formatCwdForFooter(this.ctx.cwd, home);
-		const title = `${theme.fg("accent", theme.bold("π"))} ${theme.fg("dim", "·")} ${theme.fg("muted", cwdStr)}`;
-
-		return [
-			"",
-			`  ${title}`,
-			"",
-		];
+		return [""];
 	}
 }

@@ -2,8 +2,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { TUI } from "@earendil-works/pi-tui";
 import { ModelBorderEditor } from "./editor.ts";
 import { SingleLineStatusbar } from "./footer.ts";
-import { beautifyLoadedResources, DashboardHeader } from "./header.ts";
-import { installUniversalToolHook } from "./tools.ts";
+import { SilentHeader } from "./header.ts";
 
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -107,12 +106,10 @@ export default function (pi: ExtensionAPI) {
 		// 1. 关闭内置的多余 working... 行，避免动画冲突并省出空间
 		ctx.ui.setWorkingVisible(false);
 
-		// 2. 迎宾台：极简 π 标题 + 原生资源区卡片美化 + 全量工具执行单行拦截
+		// 2. 头部：静音 Pi 内置 verbose 启动头，仅保留初始资源卡片美化；正文交还原生渲染
 		ctx.ui.setHeader((tui, theme) => {
 			activeTui = tui;
-			beautifyLoadedResources(tui, theme);
-			installUniversalToolHook(tui, theme, getSpinnerFrame);
-			return new DashboardHeader(ctx, tui, theme);
+			return new SilentHeader(tui, theme);
 		});
 
 		// 3. 遥测栏：极致单行状态栏
